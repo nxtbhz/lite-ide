@@ -180,8 +180,6 @@ pub struct App {
     pub syntax_worker: SyntaxWorker,
     pub syntax_cache: HashMap<usize, (u64, Arc<Vec<HighlightToken>>)>,
     pub syntax_in_flight: HashMap<usize, u64>,
-    syntax_range_cache: HashMap<usize, std::ops::Range<usize>>,
-    syntax_in_flight_range: HashMap<usize, std::ops::Range<usize>>,
 }
 
 impl App {
@@ -228,8 +226,6 @@ impl App {
             syntax_worker: SyntaxWorker::spawn(),
             syntax_cache: HashMap::new(),
             syntax_in_flight: HashMap::new(),
-            syntax_range_cache: HashMap::new(),
-            syntax_in_flight_range: HashMap::new(),
         })
     }
 
@@ -273,7 +269,7 @@ impl App {
         (self.terminal_width as usize).saturating_sub(gutter + exp_w)
     }
 
-    fn adjust_viewport(&mut self) {
+    pub fn adjust_viewport(&mut self) {
         let (cursor_row, cursor_col) = self.editor.cursor_line_col();
         let height = self.text_area_height().max(1);
         let width = self.text_area_width().max(1);
@@ -311,9 +307,6 @@ impl App {
                 self.syntax_cache
                     .insert(res.buffer_id, (res.revision, Arc::new(res.tokens)));
                 self.syntax_in_flight.remove(&res.buffer_id);
-                if let Some(range) = self.syntax_in_flight_range.remove(&res.buffer_id) {
-                    self.syntax_range_cache.insert(res.buffer_id, range);
-                }
                 if res.buffer_id == self.editor.active_tab().id {
                     updated = true;
                 }
@@ -342,55 +335,26 @@ impl App {
     fn update_syntax_highlights(&mut self) -> Arc<Vec<HighlightToken>> {
         let _ = self.has_pending_syntax_response();
 
-        let text_area_h = self.text_area_height();
         let active_tab = self.editor.active_tab();
         let tab_id = active_tab.id;
         let tab_rev = active_tab.revision;
-        let total_lines = active_tab.buffer.len_lines();
-
-        let vis_start_line = self.scroll_row.min(total_lines);
-        let vis_end_line = (self.scroll_row + text_area_h).min(total_lines);
-        let vis_start_byte = active_tab.buffer.line_to_byte(vis_start_line);
-        let vis_end_byte = active_tab.buffer.line_to_byte(vis_end_line);
-
-        let chunk_start_line = self.scroll_row.saturating_sub(64).min(total_lines);
-        let chunk_end_line = (self.scroll_row + text_area_h + 64).min(total_lines);
-        let chunk_start_byte = active_tab.buffer.line_to_byte(chunk_start_line);
-        let chunk_end_byte = active_tab.buffer.line_to_byte(chunk_end_line);
-
-        let range_covered = self
-            .syntax_range_cache
-            .get(&tab_id)
-            .is_some_and(|r| vis_start_byte >= r.start && vis_end_byte <= r.end);
 
         let needs_request = match self.syntax_cache.get(&tab_id) {
-            Some((cached_rev, _)) => *cached_rev != tab_rev || !range_covered,
+            Some((cached_rev, _)) => *cached_rev != tab_rev,
             None => true,
         };
 
-        let in_flight_matches = self.syntax_in_flight.get(&tab_id) == Some(&tab_rev)
-            && self
-                .syntax_in_flight_range
-                .get(&tab_id)
-                .is_some_and(|r| vis_start_byte >= r.start && vis_end_byte <= r.end);
-
-        if needs_request && !in_flight_matches {
+        if needs_request && self.syntax_in_flight.get(&tab_id) != Some(&tab_rev) {
             if let Some(lang) = self.current_language() {
-                let chunk_text = self
-                    .editor
-                    .buffer()
-                    .slice_to_cow(chunk_start_byte, chunk_end_byte)
-                    .into_owned();
-                let visible_range = chunk_start_byte..chunk_end_byte;
+                let full_text = self.editor.buffer().rope().to_string();
+                let full_len = full_text.len();
                 self.syntax_in_flight.insert(tab_id, tab_rev);
-                self.syntax_in_flight_range
-                    .insert(tab_id, visible_range.clone());
                 self.syntax_worker.send_request(SyntaxRequest {
                     buffer_id: tab_id,
                     revision: tab_rev,
                     language: lang,
-                    text: chunk_text,
-                    visible_range,
+                    text: full_text,
+                    visible_range: 0..full_len,
                 });
             }
         }
@@ -402,8 +366,6 @@ impl App {
     }
 
     pub fn render<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
-        self.adjust_viewport();
-
         let gutter_w = self.gutter_width();
         let text_h = self.text_area_height();
         let text_w = self.text_area_width();
@@ -411,7 +373,10 @@ impl App {
         let total_lines = self.editor.buffer().len_lines();
         let active_tab_idx = self.editor.active_tab_idx();
 
-        queue!(writer, MoveTo(0, 0))?;
+        // Begin synchronized frame update to eliminate all screen tearing and flickering
+        writer.write_all(b"\x1b[?2026h")?;
+        // Keep terminal cursor hidden during entire painting phase to avoid cursor teleporting across cells
+        queue!(writer, Hide, MoveTo(0, 0))?;
 
         // 1. Render File Explorer (if visible)
         if self.explorer.is_visible {
@@ -640,17 +605,28 @@ impl App {
         // 7. Position terminal cursor
         if self.prompt.is_none() && !self.palette_open && !self.which_key_open {
             if self.focus == ActiveFocus::Editor {
-                let term_cursor_row =
-                    (self.text_area_top() + cursor_row.saturating_sub(self.scroll_row)) as u16;
-                let term_cursor_col =
-                    (text_left + gutter_w + cursor_col.saturating_sub(self.scroll_col)) as u16;
-                queue!(writer, MoveTo(term_cursor_col, term_cursor_row), Show)?;
+                let in_view = cursor_row >= self.scroll_row
+                    && cursor_row < self.scroll_row + text_h
+                    && cursor_col >= self.scroll_col
+                    && cursor_col < self.scroll_col + text_w;
+
+                if in_view {
+                    let term_cursor_row =
+                        (self.text_area_top() + cursor_row - self.scroll_row) as u16;
+                    let term_cursor_col =
+                        (text_left + gutter_w + cursor_col - self.scroll_col) as u16;
+                    queue!(writer, MoveTo(term_cursor_col, term_cursor_row), Show)?;
+                } else {
+                    queue!(writer, Hide)?;
+                }
             } else {
                 // Focus in explorer: hide terminal cursor, row selection handles highlight
                 queue!(writer, Hide)?;
             }
         }
 
+        // End synchronized frame update
+        writer.write_all(b"\x1b[?2026l")?;
         writer.flush()?;
         Ok(())
     }
@@ -880,6 +856,7 @@ impl App {
             }
             _ => {}
         }
+        self.adjust_viewport();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> std::io::Result<()> {
@@ -1133,6 +1110,16 @@ impl App {
                 KeyCode::Down => {
                     self.explorer.move_down(self.text_area_height());
                 }
+                KeyCode::PageUp => {
+                    for _ in 0..self.text_area_height().max(1) {
+                        self.explorer.move_up();
+                    }
+                }
+                KeyCode::PageDown => {
+                    for _ in 0..self.text_area_height().max(1) {
+                        self.explorer.move_down(self.text_area_height());
+                    }
+                }
                 KeyCode::Left => {
                     self.explorer.collapse_selected();
                 }
@@ -1144,6 +1131,7 @@ impl App {
                         match self.editor.open_or_load(&path) {
                             Ok(_) => {
                                 self.focus = ActiveFocus::Editor;
+                                self.adjust_viewport();
                                 self.set_status(format!("Opened {}", path.display()));
                             }
                             Err(e) => self.set_status(format!("Open error: {}", e)),
@@ -1164,6 +1152,14 @@ impl App {
             (KeyCode::Right, false, false) => self.editor.move_right(shift),
             (KeyCode::Up, false, false) => self.editor.move_up(shift),
             (KeyCode::Down, false, false) => self.editor.move_down(shift),
+            (KeyCode::PageUp, false, false) => {
+                let h = self.text_area_height().max(1);
+                self.editor.page_up(h, shift);
+            }
+            (KeyCode::PageDown, false, false) => {
+                let h = self.text_area_height().max(1);
+                self.editor.page_down(h, shift);
+            }
             (KeyCode::Home, false, false) => self.editor.move_home(shift),
             (KeyCode::End, false, false) => self.editor.move_end(shift),
             (KeyCode::Backspace, false, false) => {
@@ -1184,6 +1180,7 @@ impl App {
             _ => {}
         }
 
+        self.adjust_viewport();
         Ok(())
     }
 
@@ -1297,9 +1294,16 @@ impl App {
                 if col < exp_w && self.explorer.is_visible {
                     self.explorer.move_down(self.text_area_height());
                 } else {
-                    let max_lines = self.editor.buffer().len_lines().saturating_sub(1);
+                    let total_lines = self.editor.buffer().len_lines();
+                    let max_lines = total_lines.saturating_sub(1);
                     self.scroll_row = (self.scroll_row + 3).min(max_lines);
                 }
+            }
+            MouseEventKind::ScrollLeft => {
+                self.scroll_col = self.scroll_col.saturating_sub(3);
+            }
+            MouseEventKind::ScrollRight => {
+                self.scroll_col = self.scroll_col.saturating_add(3);
             }
             _ => {}
         }
@@ -1329,6 +1333,7 @@ impl App {
                 } else {
                     self.editor.switch_tab(i);
                 }
+                self.adjust_viewport();
                 return;
             }
             current_col += tab_len;
@@ -1337,6 +1342,7 @@ impl App {
         // Check if clicked the '[ + ]' button
         if col >= current_col && col < current_col + 6 {
             self.editor.new_tab();
+            self.adjust_viewport();
         }
     }
 }
@@ -1398,7 +1404,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut out = BufWriter::new(stdout());
+    let mut out = BufWriter::with_capacity(128 * 1024, stdout());
+    app.adjust_viewport();
     app.render(&mut out)?;
 
     while app.running {
@@ -1414,6 +1421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(AppEvent::Resize(w, h)) => {
                 app.terminal_width = w;
                 app.terminal_height = h;
+                app.adjust_viewport();
                 app.render(&mut out)?;
             }
             Ok(AppEvent::FocusLost) => {
@@ -1667,5 +1675,93 @@ mod tests {
                 .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "a"
         );
+    }
+
+    #[test]
+    fn test_app_mouse_scroll_preserves_viewport_across_renders() {
+        let mut app = App::new(None).unwrap();
+        let content = (1..=100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.editor.insert_str(&content).unwrap();
+
+        // Move cursor to line 0
+        app.editor.move_lines(-100, false);
+        app.adjust_viewport();
+        assert_eq!(app.editor.cursor_line_col().0, 0);
+        assert_eq!(app.scroll_row, 0);
+
+        // Scroll down via trackpad / mouse
+        let text_left = app.text_area_left();
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: text_left as u16 + 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+
+        assert_eq!(app.scroll_row, 3);
+
+        // Rendering MUST NOT revert scroll_row back to cursor position (0)
+        let mut sink = std::io::sink();
+        app.render(&mut sink).unwrap();
+        assert_eq!(
+            app.scroll_row, 3,
+            "render() must not snap scroll_row back to cursor_row"
+        );
+
+        // Scroll left/right
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: text_left as u16 + 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(app.scroll_col, 3);
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollLeft,
+            column: text_left as u16 + 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(app.scroll_col, 0);
+
+        // Typing a character brings the viewport back to the cursor
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.scroll_row, 0,
+            "Typing must adjust viewport back to cursor"
+        );
+    }
+
+    #[test]
+    fn test_app_page_up_and_page_down() {
+        let mut app = App::new(None).unwrap();
+        let content = (1..=100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.editor.insert_str(&content).unwrap();
+        app.editor.move_lines(-100, false);
+        app.adjust_viewport();
+
+        assert_eq!(app.editor.cursor_line_col().0, 0);
+
+        // Page Down
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))
+            .unwrap();
+        let h = app.text_area_height();
+        assert_eq!(app.editor.cursor_line_col().0, h);
+
+        // Page Up
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.editor.cursor_line_col().0, 0);
     }
 }

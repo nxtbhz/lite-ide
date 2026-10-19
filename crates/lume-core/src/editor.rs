@@ -937,6 +937,62 @@ impl Editor {
         }
     }
 
+    pub fn move_lines(&mut self, delta: isize, select: bool) {
+        if delta == 0 {
+            return;
+        }
+        let tab = &mut self.tabs[self.active_tab];
+        let total_lines = tab.buffer.len_lines();
+        if total_lines == 0 {
+            return;
+        }
+
+        let head = tab.cursors.primary().head;
+        let line = tab.buffer.byte_to_line(head);
+
+        let target_line = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            (line + delta as usize).min(total_lines.saturating_sub(1))
+        };
+
+        let line_start_char = tab.buffer.rope().line_to_char(line);
+        let cursor_char = tab.buffer.byte_to_char(head);
+        let col = cursor_char.saturating_sub(line_start_char);
+
+        let target_line_start_char = tab.buffer.rope().line_to_char(target_line);
+        let target_line_len = tab.buffer.line_len_chars(target_line);
+        let target_content_len = if target_line_len > 0
+            && tab
+                .buffer
+                .rope()
+                .char(target_line_start_char + target_line_len - 1)
+                == '\n'
+        {
+            target_line_len - 1
+        } else {
+            target_line_len
+        };
+
+        let target_char = target_line_start_char + col.min(target_content_len);
+        let target_byte = tab.buffer.char_to_byte(target_char);
+
+        let primary = tab.cursors.primary_mut();
+        if select {
+            primary.select_to(target_byte);
+        } else {
+            primary.move_to(target_byte);
+        }
+    }
+
+    pub fn page_up(&mut self, lines: usize, select: bool) {
+        self.move_lines(-(lines as isize), select);
+    }
+
+    pub fn page_down(&mut self, lines: usize, select: bool) {
+        self.move_lines(lines as isize, select);
+    }
+
     pub fn undo(&mut self) -> bool {
         let tab = &mut self.tabs[self.active_tab];
         if let Some(cursors) = tab.history.undo(&mut tab.buffer) {
@@ -1366,5 +1422,39 @@ mod tests {
             ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
             "01X234X56789"
         );
+    }
+
+    #[test]
+    fn test_editor_page_up_and_page_down() {
+        let mut ed = Editor::new();
+        let content = (1..=50)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ed.insert_str(&content).unwrap();
+
+        // Cursor at bottom
+        assert_eq!(ed.cursor_line_col().0, 49);
+
+        // Page up by 10 lines
+        ed.page_up(10, false);
+        assert_eq!(ed.cursor_line_col().0, 39);
+
+        // Page up by 100 lines (clamps to line 0)
+        ed.page_up(100, false);
+        assert_eq!(ed.cursor_line_col().0, 0);
+
+        // Page down by 15 lines
+        ed.page_down(15, false);
+        assert_eq!(ed.cursor_line_col().0, 15);
+
+        // Page down past end (clamps to last line 49)
+        ed.page_down(100, false);
+        assert_eq!(ed.cursor_line_col().0, 49);
+
+        // Selection with shift
+        ed.page_up(10, true);
+        assert_eq!(ed.cursor_line_col().0, 39);
+        assert!(ed.cursors().primary().is_selection());
     }
 }
