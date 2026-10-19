@@ -308,7 +308,7 @@ ratio_rss_code = rss_c_v_mb / rss_c_l_mb
 ratio_disk_v = vim_total_mb / lume_stripped_mb
 ratio_disk_n = nvim_total_mb / lume_stripped_mb
 
-content = f"""# ⚡ Benchmark: Lume vs. Vim vs. Neovim
+content = f"""# Benchmark Comparativo: Lume vs. Vim vs. Neovim
 
 > **Data da Execução:** {date_str}  
 > **Ambiente de Teste:** {cpu_model} ({nproc} vCPUs) | {mem_total} RAM | {os_name} (Kernel {kernel})  
@@ -322,18 +322,18 @@ content = f"""# ⚡ Benchmark: Lume vs. Vim vs. Neovim
 
 ## 1. Visão Geral dos Resultados
 
-| Dimensão Avaliada | 🏆 Lume | 🥈 Vim | 🥉 Neovim | Vencedor da Categoria |
+| Dimensão Avaliada | Lume | Vim | Neovim | Comparativo / Relação |
 | :--- | :---: | :---: | :---: | :---: |
-| **Startup a Frio (Vazio)** | **{l_empty_m:.1f} ms** | {v_empty_m:.1f} ms | {n_empty_m:.1f} ms | 🏆 **Lume ({ratio_v_empty:.1f}x–{ratio_n_empty:.1f}x mais rápido)** |
-| **Startup (Código Rust 1.580 linhas)** | **{l_code_m:.1f} ms** | {v_code_m:.1f} ms | {n_code_m:.1f} ms | 🏆 **Lume ({ratio_v_code:.1f}x–{ratio_n_code:.1f}x mais rápido)** |
-| **Startup (Arquivo C 100k linhas / {size_100k})** | **{l_100k_m:.1f} ms** | {v_100k_m:.1f} ms | {n_100k_m:.1f} ms | 🏆 **Lume ({ratio_v_100k:.1f}x–{ratio_n_100k:.1f}x mais rápido)** |
-| **Startup (Arquivo C 500k linhas / {size_500k})** | {l_500k_m:.1f} ms | {v_500k_m:.1f} ms | **{n_500k_m:.1f} ms** | 🥈 **Empate técnico (~2% dif.)** |
-| **RAM Inicial (Peak RSS Vazio)** | **{rss_e_l_mb:.2f} MB** | {rss_e_v_mb:.2f} MB | {rss_e_n_mb:.2f} MB | 🏆 **Lume ({ratio_rss_empty:.1f}x menos memória)** |
-| **RAM (Código Real 1.580 linhas)** | **{rss_c_l_mb:.2f} MB** | {rss_c_v_mb:.2f} MB | {rss_c_n_mb:.2f} MB | 🏆 **Lume ({ratio_rss_code:.1f}x menos memória)** |
-| **RAM (Arquivo C 500k linhas / {size_500k})** | {rss_500_l_mb:.2f} MB | **{rss_500_v_mb:.2f} MB** | {rss_500_n_mb:.2f} MB | 🥈 **Vim / Neovim** |
-| **Espaço Total em Disco (Instalação)** | **{lume_stripped_mb:.1f} MB** | {vim_total_mb:.1f} MB | {nvim_total_mb:.1f} MB | 🏆 **Lume ({ratio_disk_n:.1f}x–{ratio_disk_v:.1f}x menor)** |
-| **Dependências Dinâmicas (`ldd`)** | **{lume_libs} bibliotecas** | {vim_libs} bibliotecas | {nvim_libs} bibliotecas | 🏆 **Lume (autocontido)** |
-| **Recursos de IDE Out-of-the-Box** | **Completos** | Quase nulos | Básicos | 🏆 **Lume (Zero-Config)** |
+| **Startup a Frio (Vazio)** | {l_empty_m:.1f} ms | {v_empty_m:.1f} ms | {n_empty_m:.1f} ms | Vim {ratio_v_empty:.1f}x / Neovim {ratio_n_empty:.1f}x tempo do Lume |
+| **Startup (Código Rust 1.580 linhas)** | {l_code_m:.1f} ms | {v_code_m:.1f} ms | {n_code_m:.1f} ms | Vim {ratio_v_code:.1f}x / Neovim {ratio_n_code:.1f}x tempo do Lume |
+| **Startup (Arquivo C 100k linhas / {size_100k})** | {l_100k_m:.1f} ms | {v_100k_m:.1f} ms | {n_100k_m:.1f} ms | Vim {ratio_v_100k:.1f}x / Neovim {ratio_n_100k:.1f}x tempo do Lume |
+| **Startup (Arquivo C 500k linhas / {size_500k})** | {l_500k_m:.1f} ms | {v_500k_m:.1f} ms | {n_500k_m:.1f} ms | Diferença de {abs(l_500k_m - n_500k_m):.1f} ms entre Lume e Neovim |
+| **RAM Inicial (Peak RSS Vazio)** | {rss_e_l_mb:.2f} MB | {rss_e_v_mb:.2f} MB | {rss_e_n_mb:.2f} MB | Vim {ratio_rss_empty:.1f}x / Neovim {rss_e_n_mb/rss_e_l_mb:.1f}x memória do Lume |
+| **RAM (Código Real 1.580 linhas)** | {rss_c_l_mb:.2f} MB | {rss_c_v_mb:.2f} MB | {rss_c_n_mb:.2f} MB | Vim {ratio_rss_code:.1f}x / Neovim {rss_c_n_mb/rss_c_l_mb:.1f}x memória do Lume |
+| **RAM (Arquivo C 500k linhas / {size_500k})** | {rss_500_l_mb:.2f} MB | {rss_500_v_mb:.2f} MB | {rss_500_n_mb:.2f} MB | Lume {rss_500_l_mb/rss_500_v_mb:.1f}x consumo de Vim/Neovim (overhead de B-Tree) |
+| **Espaço Total em Disco (Instalação)** | {lume_stripped_mb:.1f} MB | {vim_total_mb:.1f} MB | {nvim_total_mb:.1f} MB | Vim {ratio_disk_v:.1f}x / Neovim {ratio_disk_n:.1f}x tamanho do Lume |
+| **Dependências Dinâmicas (`ldd`)** | {lume_libs} bibliotecas | {vim_libs} bibliotecas | {nvim_libs} bibliotecas | Lume binário estático com dependências base de sistema |
+| **Recursos de IDE Integrados** | Tree-sitter nativo, mouse SGR, abas | Scripts/regex em runtime externo | API de plugins Lua, headless | Comparação funcional out-of-the-box |
 
 ---
 
@@ -345,11 +345,11 @@ Medido com `hyperfine` (médias sobre iterações reais com warm-up prévio):
 ```bash
 hyperfine --warmup 15 -r 50 "./target/release/lume --bench-startup" "vim --clean -e -s -c q" "nvim --clean --headless -c q"
 ```
-| Editor | Média ± Desvio | Mínimo | Máximo | Velocidade Relativa |
+| Editor | Média ± Desvio | Mínimo | Máximo | Razão Relativa (vs. Lume) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Lume** | **{l_empty_m:.1f} ms ± {l_empty_s:.1f} ms** | **{l_empty_min:.1f} ms** | **{l_empty_max:.1f} ms** | **1.00 (Mais Rápido)** |
-| **Vim** | {v_empty_m:.1f} ms ± {v_empty_s:.1f} ms | {v_empty_min:.1f} ms | {v_empty_max:.1f} ms | {ratio_v_empty:.2f}x mais lento |
-| **Neovim** | {n_empty_m:.1f} ms ± {n_empty_s:.1f} ms | {n_empty_min:.1f} ms | {n_empty_max:.1f} ms | {ratio_n_empty:.2f}x mais lento |
+| **Lume** | {l_empty_m:.1f} ms ± {l_empty_s:.1f} ms | {l_empty_min:.1f} ms | {l_empty_max:.1f} ms | 1.00x (referência) |
+| **Vim** | {v_empty_m:.1f} ms ± {v_empty_s:.1f} ms | {v_empty_min:.1f} ms | {v_empty_max:.1f} ms | {ratio_v_empty:.2f}x |
+| **Neovim** | {n_empty_m:.1f} ms ± {n_empty_s:.1f} ms | {n_empty_min:.1f} ms | {n_empty_max:.1f} ms | {ratio_n_empty:.2f}x |
 
 > *Nota interna do Lume:* O tempo medido pelo Criterion para inicialização do motor interno (`Editor::new()`) é de apenas **216 nanosegundos**.
 
@@ -357,17 +357,17 @@ hyperfine --warmup 15 -r 50 "./target/release/lume --bench-startup" "vim --clean
 ```bash
 hyperfine --warmup 10 -r 25 "./target/release/lume --bench-startup crates/lume-tui/src/main.rs" "vim --clean -e -s crates/lume-tui/src/main.rs -c q" "nvim --clean --headless crates/lume-tui/src/main.rs -c q"
 ```
-| Editor | Média ± Desvio | Mínimo | Máximo | Velocidade Relativa |
+| Editor | Média ± Desvio | Mínimo | Máximo | Razão Relativa (vs. Lume) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Lume** | **{l_code_m:.1f} ms ± {l_code_s:.1f} ms** | **{l_code_min:.1f} ms** | **{l_code_max:.1f} ms** | **1.00 (Mais Rápido)** |
-| **Vim** | {v_code_m:.1f} ms ± {v_code_s:.1f} ms | {v_code_min:.1f} ms | {v_code_max:.1f} ms | {ratio_v_code:.2f}x mais lento |
-| **Neovim** | {n_code_m:.1f} ms ± {n_code_s:.1f} ms | {n_code_min:.1f} ms | {n_code_max:.1f} ms | {ratio_n_code:.2f}x mais lento |
+| **Lume** | {l_code_m:.1f} ms ± {l_code_s:.1f} ms | {l_code_min:.1f} ms | {l_code_max:.1f} ms | 1.00x (referência) |
+| **Vim** | {v_code_m:.1f} ms ± {v_code_s:.1f} ms | {v_code_min:.1f} ms | {v_code_max:.1f} ms | {ratio_v_code:.2f}x |
+| **Neovim** | {n_code_m:.1f} ms ± {n_code_s:.1f} ms | {n_code_min:.1f} ms | {n_code_max:.1f} ms | {ratio_n_code:.2f}x |
 
 ### 2.3 Arquivos Grandes (100.000 e 500.000 linhas de C)
 | Cenário | Lume | Vim | Neovim |
 | :--- | :---: | :---: | :---: |
-| **100k Linhas ({size_100k})** | **{l_100k_m:.1f} ms** | {v_100k_m:.1f} ms (+{((v_100k_m/l_100k_m)-1)*100:.0f}%) | {n_100k_m:.1f} ms (+{((n_100k_m/l_100k_m)-1)*100:.0f}%) |
-| **500k Linhas ({size_500k})** | {l_500k_m:.1f} ms | {v_500k_m:.1f} ms | **{n_500k_m:.1f} ms** |
+| **100k Linhas ({size_100k})** | {l_100k_m:.1f} ms | {v_100k_m:.1f} ms (+{((v_100k_m/l_100k_m)-1)*100:.0f}%) | {n_100k_m:.1f} ms (+{((n_100k_m/l_100k_m)-1)*100:.0f}%) |
+| **500k Linhas ({size_500k})** | {l_500k_m:.1f} ms | {v_500k_m:.1f} ms | {n_500k_m:.1f} ms |
 
 ---
 
@@ -404,11 +404,11 @@ Arquivo de 500.000 linhas ({size_500k}):
 
 | Métrica | Lume | Vim | Neovim |
 | :--- | :---: | :---: | :---: |
-| **Tamanho do Binário** | **{lume_stripped_mb:.1f} MB** *(despojado)* | {vim_bin_mb:.1f} MB | {nvim_bin_mb:.1f} MB |
-| **Diretório de Runtime / Assets** | **0 MB** *(embutido no binário)* | {vim_share_mb:.1f} MB (`/usr/share/vim`) | {nvim_share_mb:.1f} MB (`/usr/share/nvim`) |
-| **Armazenamento Total Necessário** | **{lume_stripped_mb:.1f} MB** | **{vim_total_mb:.1f} MB** | **{nvim_total_mb:.1f} MB** |
-| **Bibliotecas Compartilhadas (`ldd`)** | **{lume_libs}** (`libc`, `libm`, `libgcc`, `ld-linux`) | **{vim_libs}** | **{nvim_libs}** (`libuv`, `libmsgpack`, `libluajit`...) |
-| **Dependências de Execução** | Nenhuma (standalone) | Runtimes legados | LuaJIT runtime |
+| **Tamanho do Binário** | {lume_stripped_mb:.1f} MB *(despojado)* | {vim_bin_mb:.1f} MB | {nvim_bin_mb:.1f} MB |
+| **Diretório de Runtime / Assets** | 0 MB *(embutido no binário)* | {vim_share_mb:.1f} MB (`/usr/share/vim`) | {nvim_share_mb:.1f} MB (`/usr/share/nvim`) |
+| **Armazenamento Total Necessário** | {lume_stripped_mb:.1f} MB | {vim_total_mb:.1f} MB | {nvim_total_mb:.1f} MB |
+| **Bibliotecas Compartilhadas (`ldd`)** | {lume_libs} (`libc`, `libm`, `libgcc`, `ld-linux`) | {vim_libs} | {nvim_libs} (`libuv`, `libmsgpack`, `libluajit`...) |
+| **Dependências de Execução** | Standalone | Runtimes legados | LuaJIT runtime |
 
 ---
 
@@ -425,53 +425,34 @@ Testes de latência no núcleo do Lume com 100.000 linhas ativas na memória:
 
 ---
 
-## 6. Recursos "Out-of-the-Box" (IDE vs. Editor Puro)
+## 6. Recursos "Out-of-the-Box" (Comparativo de Funcionalidades)
 
 | Recurso | Lume | Vim | Neovim |
 | :--- | :---: | :---: | :---: |
-| **Syntax Highlighting Tree-sitter** | ✅ **Nativo (6 linguagens)** | ❌ (Regex legado síncrono) | ⚠️ (Requer plugins + compilação) |
-| **Execução Assíncrona de Syntax** | ✅ **Thread dedicada (não trava UI)** | ❌ (Single-thread) | ⚠️ (Parcial via Lua) |
-| **Suporte a Mouse Completo** | ✅ **Cliques, drag, 2x/3x clique, abas** | ⚠️ (Básico) | ⚠️ (Básico) |
-| **Explorador de Arquivos em Árvore** | ✅ **Nativo (F2, auto-refresh)** | ⚠️ (Netrw antigo) | ⚠️ (Netrw antigo) |
-| **Gerenciador Visual de Abas** | ✅ **Nativo e interativo** | ⚠️ (Linha de abas texto) | ⚠️ (Linha de abas texto) |
-| **Autosave Atômico em Background** | ✅ **fsync + atomic rename assíncrono** | ❌ (swapfiles síncronos) | ❌ (swapfiles síncronos) |
-| **Diário de Recuperação de Falhas** | ✅ **Crash Journal append-only** | ⚠️ (.swp recovery manual) | ⚠️ (.swp recovery manual) |
-| **Curva de Aprendizado / Ergonomia** | ✅ **Modeless (estilo VS Code)** | ❌ Modal estrito | ❌ Modal estrito |
+| **Syntax Highlighting Tree-sitter** | Nativo (6 linguagens) | Não (Regex legado síncrono) | Requer plugins/compilação |
+| **Execução Assíncrona de Syntax** | Thread dedicada (não trava UI) | Não (Single-thread) | Parcial via Lua |
+| **Suporte a Mouse Completo** | Cliques, drag, 2x/3x clique, abas | Básico | Básico |
+| **Explorador de Arquivos em Árvore** | Nativo (F2, auto-refresh) | Netrw legado | Netrw legado |
+| **Gerenciador Visual de Abas** | Nativo e interativo | Linha de abas texto | Linha de abas texto |
+| **Autosave Atômico em Background** | fsync + atomic rename assíncrono | Não (swapfiles síncronos) | Não (swapfiles síncronos) |
+| **Diário de Recuperação de Falhas** | Crash Journal append-only | .swp recovery manual | .swp recovery manual |
+| **Modelo de Interação** | Modeless (estilo padrão) | Modal estrito | Modal estrito |
 
 ---
 
-## 7. O Veredito
+## 7. Análise Técnica e Trade-offs Arquiteturais
 
-### 🏆 Vencedor Geral: **Lume**
+### 7.1 Inicialização e Pegada em Disco
+- **Tempo de Boot:** O Lume apresenta menor latência de inicialização a frio ({l_empty_m:.1f} ms vazio e {l_code_m:.1f} ms em arquivo real), pois é compilado diretamente em código nativo sem inicialização de interpretadores embutidos.
+- **Distribuição Autocontida:** O Lume concentra executável, syntax highlighting e explorador em um binário único de {lume_stripped_mb:.1f} MB, dispensando diretórios de assets externos como `/usr/share/vim` ({vim_share_mb:.1f} MB) ou `/usr/share/nvim` ({nvim_share_mb:.1f} MB).
 
-O **Lume** é o vencedor geral da comparação para a proposta de um ambiente de desenvolvimento e edição moderno, leve e eficiente.
+### 7.2 Uso de Memória e Estruturas de Buffer
+- **Edição Interativa (Buffers normais):** Em buffers de até dezenas de milhares de linhas, o consumo de RAM do Lume ({rss_c_l_mb:.1f} MB) mantém-se inferior ao de Vim ({rss_c_v_mb:.1f} MB) e Neovim ({rss_c_n_mb:.1f} MB).
+- **Arquivos Massivos (> 500.000 linhas):** Devido à estrutura de B-Tree de Ropes (`ropey`), que aloca nós e índices balanceados para garantir mutações e buscas $O(\\log N)$ em microsegundos, o Lume consome mais memória ({rss_500_l_mb:.1f} MB) do que a representação plana e linear do Vim ({rss_500_v_mb:.1f} MB) e Neovim ({rss_500_n_mb:.1f} MB).
 
-#### Por que o Lume Ganhou?
-1. **Velocidade de Inicialização Imbatível:** Com **{l_empty_m:.1f} ms** de inicialização a frio e **{l_code_m:.1f} ms** para carregar arquivos de código reais, o Lume é **~{ratio_v_empty:.0f}x mais rápido que o Vim** e **~{ratio_n_empty:.0f}x a {ratio_n_code:.0f}x mais rápido que o Neovim**.
-2. **Eficiência de Memória no Fluxo Diário:** Ocupa apenas **{rss_e_l_mb:.1f} MB de RAM** inicial e **{rss_c_l_mb:.1f} MB** com código real aberto — consumindo menos de 1/3 da memória de Vim e Neovim.
-3. **Menor Pegada em Disco e Portabilidade Máxima:** Um único binário de **{lume_stripped_mb:.1f} MB** contém todo o editor, parsers de Tree-sitter para C, C++, Rust, Python, Java e JavaScript, explorador de arquivos e gerenciador de abas. Não requer a instalação de dezenas de megabytes de arquivos de runtime em `/usr/share`.
-4. **Experiência de IDE Pronta (Zero-Config):** Enquanto Vim e Neovim exigem horas de configuração, gerenciadores de pacotes externos e scripts em Lua/Vimscript para oferecer navegação por abas, suporte a mouse avançado, autosave não-bloqueante e tree-sitter, o Lume entrega tudo isso nativamente, sem travar a interface gráfica.
-
----
-
-### Por que os Outros "Perderam"?
-
-#### 🥉 Por que o Neovim Perdeu?
-- **Inicialização mais lenta:** Ficou em último lugar no tempo de boot ({n_empty_m:.1f} ms vazio e {n_code_m:.1f} ms com arquivo real). Ao adicionar plugins usuais de IDE (como LSP, nvim-tree, telescope e treesitter), esse tempo costuma saltar para 80–250 ms.
-- **Pegada de armazenamento elevada:** Exige mais de **{nvim_total_mb:.1f} MB** em disco e depende de runtimes dinâmicos como LuaJIT e `libuv`.
-- **Não é uma IDE out-of-the-box:** Sem plugins de terceiros e arquivos de configuração complexos (`init.lua`), é apenas um editor modal básico com suporte limitado a mouse e sem árvore de arquivos moderna.
-
-#### 🥈 Por que o Vim Perdeu?
-- **Maior pegada total de disco:** Requer **{vim_total_mb:.1f} MB** em disco devido a décadas de scripts legados, documentação e esquemas de sintaxe regex na pasta `/usr/share/vim`.
-- **Arquitetura Single-Thread herdada:** Operações de I/O, autosave e análise de arquivos de sintaxe pesados congelam o event loop e a renderização do terminal.
-- **Falta de recursos modernos:** Não possui suporte nativo a Tree-sitter desacoplado em background threads nem experiência out-of-the-box para novos desenvolvedores sem memorização de comandos modais.
-
----
-
-### ⚖️ Onde Vim e Neovim Ainda se Destacam (Ressalvas Justas)
-- **Extensibilidade e Ecossistema:** O Neovim possui o ecossistema mais vasto de plugins e personalização via Lua do planeta.
-- **Disponibilidade Universal:** O Vim está pré-instalado por padrão em praticamente qualquer servidor Unix/Linux existente desde 1991.
-- **Arquivos Gigantescos Monolíticos (> 500.000 linhas / {size_500k}):** Devido à estrutura simples de linhas planas do Vim/Neovim, eles utilizam menos RAM ao carregar arquivos massivos ({rss_500_v_mb:.1f} MB vs {rss_500_l_mb:.1f} MB do Lume), enquanto o Lume mantém árvores B-Tree com índices de bytes e workers de sintaxe preparados para edição concorrente em microsegundos.
+### 7.3 Arquitetura de Concorrência vs. Ecossistema
+- **Concorrência:** O Lume desacopla I/O, autosave atômico e parsing de Tree-sitter em threads dedicadas, prevenindo congelamento do loop da interface em arquivos grandes ou operações de escrita.
+- **Extensibilidade:** Vim e Neovim contam com ecossistemas consolidados e bibliotecas de plugins maduras desenvolvidas ao longo de décadas.
 """
 
 with open(doc_target, "w", encoding="utf-8") as f:
