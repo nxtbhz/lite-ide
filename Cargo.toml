@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Lume Team"]
+authors = ["Nicolas Dias <nicolasbhgamer@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lume-ide/lume"
 
