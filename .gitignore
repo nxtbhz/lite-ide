@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.lume_tmp
 /docs/
+benchmark.sh
+rust_out
