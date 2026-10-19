@@ -299,4 +299,28 @@ mod tests {
             elapsed
         );
     }
+
+    #[test]
+    fn test_insertion_latency_in_500k_lines() {
+        let mut text = String::with_capacity(500_000 * 25);
+        for i in 0..500_000 {
+            use std::fmt::Write;
+            let _ = writeln!(text, "fn f{}() {{}}", i);
+        }
+
+        let mut buf = RopeBuffer::from_str(&text);
+        assert_eq!(buf.len_lines(), 500_001);
+
+        let mid_byte = buf.line_to_byte(250_000);
+        let start = std::time::Instant::now();
+        buf.insert(mid_byte, "// comment\n").unwrap();
+        let elapsed = start.elapsed();
+
+        // Target: insertion in 500k lines < 5ms
+        assert!(
+            elapsed < std::time::Duration::from_millis(5),
+            "Insertion took {:?}, exceeding 5ms target",
+            elapsed
+        );
+    }
 }

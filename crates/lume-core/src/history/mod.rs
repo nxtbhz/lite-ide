@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
-    pub delta: TextDelta,
+    pub deltas: Vec<TextDelta>,
     pub cursors_before: Vec<Cursor>,
     pub cursors_after: Vec<Cursor>,
 }
@@ -13,6 +13,14 @@ pub trait HistoryManager {
     fn record_edit(
         &mut self,
         delta: TextDelta,
+        cursors_before: Vec<Cursor>,
+        cursors_after: Vec<Cursor>,
+    ) {
+        self.record_edits(vec![delta], cursors_before, cursors_after);
+    }
+    fn record_edits(
+        &mut self,
+        deltas: Vec<TextDelta>,
         cursors_before: Vec<Cursor>,
         cursors_after: Vec<Cursor>,
     );
@@ -51,15 +59,15 @@ impl History {
 }
 
 impl HistoryManager for History {
-    fn record_edit(
+    fn record_edits(
         &mut self,
-        delta: TextDelta,
+        deltas: Vec<TextDelta>,
         cursors_before: Vec<Cursor>,
         cursors_after: Vec<Cursor>,
     ) {
         self.redo_stack.clear();
         self.undo_stack.push(HistoryEntry {
-            delta,
+            deltas,
             cursors_before,
             cursors_after,
         });
@@ -67,15 +75,16 @@ impl HistoryManager for History {
 
     fn undo(&mut self, current_buffer: &mut dyn TextBuffer) -> Option<Vec<Cursor>> {
         let entry = self.undo_stack.pop()?;
-        let delta = &entry.delta;
 
-        // Revert edit: remove new_text, re-insert old_text
-        if !delta.new_text.is_empty() {
-            let _ =
-                current_buffer.delete(delta.start_byte, delta.start_byte + delta.new_text.len());
-        }
-        if !delta.old_text.is_empty() {
-            let _ = current_buffer.insert(delta.start_byte, &delta.old_text);
+        // Revert edits in reverse order
+        for delta in entry.deltas.iter().rev() {
+            if !delta.new_text.is_empty() {
+                let _ = current_buffer
+                    .delete(delta.start_byte, delta.start_byte + delta.new_text.len());
+            }
+            if !delta.old_text.is_empty() {
+                let _ = current_buffer.insert(delta.start_byte, &delta.old_text);
+            }
         }
 
         let cursors = entry.cursors_before.clone();
@@ -85,15 +94,16 @@ impl HistoryManager for History {
 
     fn redo(&mut self, current_buffer: &mut dyn TextBuffer) -> Option<Vec<Cursor>> {
         let entry = self.redo_stack.pop()?;
-        let delta = &entry.delta;
 
-        // Re-apply edit: remove old_text, insert new_text
-        if !delta.old_text.is_empty() {
-            let _ =
-                current_buffer.delete(delta.start_byte, delta.start_byte + delta.old_text.len());
-        }
-        if !delta.new_text.is_empty() {
-            let _ = current_buffer.insert(delta.start_byte, &delta.new_text);
+        // Re-apply edits in forward order
+        for delta in &entry.deltas {
+            if !delta.old_text.is_empty() {
+                let _ = current_buffer
+                    .delete(delta.start_byte, delta.start_byte + delta.old_text.len());
+            }
+            if !delta.new_text.is_empty() {
+                let _ = current_buffer.insert(delta.start_byte, &delta.new_text);
+            }
         }
 
         let cursors = entry.cursors_after.clone();

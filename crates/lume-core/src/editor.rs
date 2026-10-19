@@ -1,43 +1,70 @@
 use crate::autosave::AutoSaveController;
-use crate::buffer::{BufferError, RopeBuffer, TextBuffer};
+use crate::buffer::{BufferError, RopeBuffer, TextBuffer, TextDelta};
 use crate::cursor::{Cursor, CursorSet};
 use crate::history::{History, HistoryManager};
 use crate::journal::Journal;
+use crossbeam_channel::{Receiver, Sender};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug)]
+pub struct TabSyncState {
+    pub revision: AtomicU64,
+    pub is_dirty: AtomicBool,
+    pub journal_lock: Mutex<()>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AsyncSaveEvent {
+    pub tab_id: usize,
+    pub path: PathBuf,
+    pub save_revision: u64,
+    pub result: Result<(), String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Tab {
     pub id: usize,
+    pub revision: u64,
     pub buffer: RopeBuffer,
     pub cursors: CursorSet,
     pub history: History,
     pub file_path: Option<PathBuf>,
+    pub language_override: Option<String>,
     pub is_dirty: bool,
     pub recovered_from_journal: bool,
+    sync_state: Option<Arc<TabSyncState>>,
 }
 
 impl Tab {
     pub fn new(id: usize) -> Self {
         Self {
             id,
+            revision: 0,
             buffer: RopeBuffer::new(),
             cursors: CursorSet::new(),
             history: History::new(),
             file_path: None,
+            language_override: None,
             is_dirty: false,
             recovered_from_journal: false,
+            sync_state: None,
         }
     }
 
     pub fn from_str(id: usize, text: &str) -> Self {
         Self {
             id,
+            revision: 0,
             buffer: RopeBuffer::from_str(text),
             cursors: CursorSet::new(),
             history: History::new(),
             file_path: None,
+            language_override: None,
             is_dirty: false,
             recovered_from_journal: false,
+            sync_state: None,
         }
     }
 
@@ -59,6 +86,7 @@ pub struct Editor {
     active_tab: usize,
     next_tab_id: usize,
     autosave: AutoSaveController,
+    save_channel: Option<(Sender<AsyncSaveEvent>, Receiver<AsyncSaveEvent>)>,
 }
 
 impl Default for Editor {
@@ -74,6 +102,7 @@ impl Editor {
             active_tab: 0,
             next_tab_id: 2,
             autosave: AutoSaveController::default(),
+            save_channel: None,
         }
     }
 
@@ -84,6 +113,7 @@ impl Editor {
             active_tab: 0,
             next_tab_id: 2,
             autosave: AutoSaveController::default(),
+            save_channel: None,
         }
     }
 
@@ -111,6 +141,9 @@ impl Editor {
         tab.file_path = Some(path.to_path_buf());
         tab.is_dirty = recovered;
         tab.recovered_from_journal = recovered;
+        if let Some(ref sync) = tab.sync_state {
+            sync.is_dirty.store(recovered, Ordering::SeqCst);
+        }
 
         if recovered {
             self.autosave.notify_change();
@@ -165,13 +198,42 @@ impl Editor {
         Ok(idx)
     }
 
+    pub fn open_or_load<P: AsRef<Path>>(&mut self, path: P) -> Result<usize, std::io::Error> {
+        let path = path.as_ref();
+        // If already open, switch to it
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if let Some(ref p) = tab.file_path {
+                if p == path {
+                    self.active_tab = i;
+                    return Ok(i);
+                }
+            }
+        }
+
+        // If current tab is untitled, clean, and empty, reuse it
+        let current_tab = &self.tabs[self.active_tab];
+        if current_tab.file_path.is_none()
+            && !current_tab.is_dirty
+            && current_tab.buffer.len_bytes() == 0
+        {
+            self.open_in_current_tab(path)?;
+            return Ok(self.active_tab);
+        }
+
+        let idx = self.new_tab();
+        self.open_in_current_tab(path)?;
+        Ok(idx)
+    }
+
     pub fn close_tab(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() {
             return false;
         }
 
-        if let Some(ref p) = self.tabs[index].file_path {
-            let _ = Journal::remove(p);
+        if !self.tabs[index].is_dirty {
+            if let Some(ref p) = self.tabs[index].file_path {
+                let _ = Journal::remove(p);
+            }
         }
 
         self.tabs.remove(index);
@@ -235,8 +297,21 @@ impl Editor {
         self.tabs[self.active_tab].file_path = path;
     }
 
+    pub fn language_override(&self) -> Option<&str> {
+        self.tabs[self.active_tab].language_override.as_deref()
+    }
+
+    pub fn set_language_override(&mut self, lang: Option<String>) {
+        self.tabs[self.active_tab].language_override = lang;
+    }
+
     pub fn is_dirty(&self) -> bool {
-        self.tabs[self.active_tab].is_dirty
+        let tab = &self.tabs[self.active_tab];
+        if let Some(ref sync) = tab.sync_state {
+            tab.is_dirty && sync.is_dirty.load(Ordering::SeqCst)
+        } else {
+            tab.is_dirty
+        }
     }
 
     pub fn save(&mut self) -> Result<(), std::io::Error> {
@@ -251,36 +326,168 @@ impl Editor {
         }
     }
 
-    pub fn save_as<P: AsRef<Path>>(&mut self, path: P) -> Result<(), std::io::Error> {
-        let path = path.as_ref();
-        let temp_path = path.with_extension(format!(
-            "{}.lume_tmp",
-            path.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
-        ));
+    pub fn write_buffer_atomically(path: &Path, buffer: &RopeBuffer) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+        let temp_filename = format!(".{}.lume_tmp", file_name);
+        let temp_path = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_filename),
+            _ => PathBuf::from(temp_filename),
+        };
 
-        {
+        let write_res = (|| -> Result<(), std::io::Error> {
             let file = std::fs::File::create(&temp_path)?;
             let mut writer = std::io::BufWriter::new(file);
-            self.tabs[self.active_tab].buffer.write_to(&mut writer)?;
+            buffer.write_to(&mut writer)?;
             writer.get_ref().sync_all()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_res {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
         }
 
-        std::fs::rename(&temp_path, path)?;
-        self.tabs[self.active_tab].file_path = Some(path.to_path_buf());
-        self.tabs[self.active_tab].is_dirty = false;
-        self.tabs[self.active_tab].recovered_from_journal = false;
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
 
-        // Clean up recovery journal on clean save
+        Ok(())
+    }
+
+    pub fn save_buffer_atomically(path: &Path, buffer: &RopeBuffer) -> Result<(), std::io::Error> {
+        Self::write_buffer_atomically(path, buffer)?;
         let _ = Journal::remove(path);
+        Ok(())
+    }
+
+    pub fn save_as<P: AsRef<Path>>(&mut self, path: P) -> Result<(), std::io::Error> {
+        let path = path.as_ref();
+        Self::save_buffer_atomically(path, &self.tabs[self.active_tab].buffer)?;
+
+        let tab = &mut self.tabs[self.active_tab];
+        tab.file_path = Some(path.to_path_buf());
+        tab.is_dirty = false;
+        tab.recovered_from_journal = false;
+        if let Some(ref sync) = tab.sync_state {
+            sync.is_dirty.store(false, Ordering::SeqCst);
+        }
         self.autosave.mark_saved();
 
         Ok(())
     }
 
+    /// Asynchronous save offloading disk write, fsync and rename to a background thread
+    pub fn save_async(&mut self) -> Result<(), std::io::Error> {
+        let path = match self.tabs[self.active_tab].file_path {
+            Some(ref p) => p.clone(),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No file path specified",
+                ));
+            }
+        };
+
+        let tab = &mut self.tabs[self.active_tab];
+        let tab_id = tab.id;
+        let save_revision = tab.revision;
+        // O(1) buffer clone (Arc-based rope)
+        let buffer_clone = tab.buffer.clone();
+
+        let sync = tab
+            .sync_state
+            .get_or_insert_with(|| {
+                Arc::new(TabSyncState {
+                    revision: AtomicU64::new(save_revision),
+                    is_dirty: AtomicBool::new(tab.is_dirty),
+                    journal_lock: Mutex::new(()),
+                })
+            })
+            .clone();
+        sync.revision.store(save_revision, Ordering::SeqCst);
+        sync.is_dirty.store(true, Ordering::SeqCst);
+
+        let (tx, _) = self
+            .save_channel
+            .get_or_insert_with(crossbeam_channel::unbounded);
+        let tx = tx.clone();
+
+        self.autosave.mark_saved();
+
+        std::thread::spawn(move || {
+            let result = match Self::write_buffer_atomically(&path, &buffer_clone) {
+                Ok(()) => {
+                    let _guard = sync.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    if sync.revision.load(Ordering::SeqCst) == save_revision {
+                        let _ = Journal::remove(&path);
+                        sync.is_dirty.store(false, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+
+            let _ = tx.send(AsyncSaveEvent {
+                tab_id,
+                path,
+                save_revision,
+                result,
+            });
+        });
+
+        Ok(())
+    }
+
+    pub fn poll_async_saves(&mut self) -> Vec<AsyncSaveEvent> {
+        let mut events = Vec::new();
+        if let Some((_, ref rx)) = self.save_channel {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        }
+
+        for ev in &events {
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == ev.tab_id) {
+                match ev.result {
+                    Ok(()) => {
+                        if tab.revision == ev.save_revision {
+                            tab.is_dirty = false;
+                            tab.recovered_from_journal = false;
+                            if let Some(ref sync) = tab.sync_state {
+                                let _guard =
+                                    sync.journal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                                if sync.revision.load(Ordering::SeqCst) == ev.save_revision {
+                                    sync.is_dirty.store(false, Ordering::SeqCst);
+                                    let _ = Journal::remove(&ev.path);
+                                }
+                            } else {
+                                let _ = Journal::remove(&ev.path);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tab.is_dirty = true;
+                        if let Some(ref sync) = tab.sync_state {
+                            sync.is_dirty.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+        }
+
+        events
+    }
+
     // AutoSave check
     pub fn check_autosave(&mut self) -> bool {
         if self.autosave.should_autosave(self.is_dirty()) && self.file_path().is_some() {
-            self.save().is_ok()
+            self.save_async().is_ok()
         } else {
             false
         }
@@ -294,17 +501,35 @@ impl Editor {
         &mut self.autosave
     }
 
-    fn record_edit_internal(&mut self) {
-        self.tabs[self.active_tab].is_dirty = true;
+    fn record_edit_internal(&mut self, deltas: &[TextDelta]) {
+        let tab = &mut self.tabs[self.active_tab];
+        tab.is_dirty = true;
+        tab.revision += 1;
+        let sync_clone = tab.sync_state.clone();
+        if let Some(ref sync) = sync_clone {
+            sync.revision.store(tab.revision, Ordering::SeqCst);
+            sync.is_dirty.store(true, Ordering::SeqCst);
+        }
         self.autosave.notify_change();
 
-        // Write to crash recovery journal if file path is known
+        // Write append-only binary deltas to crash recovery journal if file path is known
         if let Some(ref path) = self.tabs[self.active_tab].file_path {
-            let text = self.tabs[self.active_tab]
-                .buffer
-                .slice_to_cow(0, self.tabs[self.active_tab].buffer.len_bytes());
-            let _ = Journal::record(path, &text);
+            let _guard = sync_clone
+                .as_ref()
+                .map(|s| s.journal_lock.lock().unwrap_or_else(|e| e.into_inner()));
+            if deltas.is_empty() {
+                let text = self.tabs[self.active_tab]
+                    .buffer
+                    .slice_to_cow(0, self.tabs[self.active_tab].buffer.len_bytes());
+                let _ = Journal::record(path, &text);
+            } else {
+                let _ = Journal::record_deltas(path, deltas);
+            }
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.tabs[self.active_tab].revision
     }
 
     pub fn cursor_line_col(&self) -> (usize, usize) {
@@ -409,27 +634,42 @@ impl Editor {
     pub fn insert_str(&mut self, s: &str) -> Result<(), BufferError> {
         let tab = &mut self.tabs[self.active_tab];
         let cursors_before = tab.cursors.cursors().to_vec();
-        let primary = *tab.cursors.primary();
 
-        let insert_pos = if primary.is_selection() {
-            let start = primary.min();
-            let end = primary.max();
-            let del_delta = tab.buffer.delete(start, end)?;
-            tab.history
-                .record_edit(del_delta, cursors_before.clone(), vec![Cursor::new(start)]);
-            start
-        } else {
-            primary.head
-        };
+        let mut sorted_cursors = cursors_before.clone();
+        sorted_cursors.sort_by_key(|c| (c.min(), c.max()));
 
-        let delta = tab.buffer.insert(insert_pos, s)?;
-        let new_pos = insert_pos + s.len();
-        tab.cursors.set_single(new_pos);
+        let mut deltas: Vec<TextDelta> = Vec::new();
+        let mut new_cursors: Vec<Cursor> = Vec::new();
+        let mut delta_offset: isize = 0;
+
+        for cursor in sorted_cursors {
+            let start = (cursor.min() as isize + delta_offset) as usize;
+            let end = (cursor.max() as isize + delta_offset) as usize;
+
+            let mut old_text = String::new();
+            let del_len = if cursor.is_selection() && start < end && end <= tab.buffer.len_bytes() {
+                let del_delta = tab.buffer.delete(start, end)?;
+                let len = del_delta.old_text.len();
+                old_text = del_delta.old_text;
+                len
+            } else {
+                0
+            };
+
+            let ins_delta = tab.buffer.insert(start, s)?;
+            let new_pos = start + s.len();
+            new_cursors.push(Cursor::new(new_pos));
+
+            deltas.push(TextDelta::new(start, old_text, ins_delta.new_text));
+            delta_offset += s.len() as isize - del_len as isize;
+        }
+
+        tab.cursors.set_cursors(new_cursors);
         let cursors_after = tab.cursors.cursors().to_vec();
 
         tab.history
-            .record_edit(delta, cursors_before, cursors_after);
-        self.record_edit_internal();
+            .record_edits(deltas.clone(), cursors_before, cursors_after);
+        self.record_edit_internal(&deltas);
         Ok(())
     }
 
@@ -439,27 +679,46 @@ impl Editor {
 
     pub fn delete_backwards(&mut self) -> Result<(), BufferError> {
         let tab = &mut self.tabs[self.active_tab];
-        let primary = *tab.cursors.primary();
         let cursors_before = tab.cursors.cursors().to_vec();
 
-        if primary.is_selection() {
-            let start = primary.min();
-            let end = primary.max();
-            let delta = tab.buffer.delete(start, end)?;
-            tab.cursors.set_single(start);
+        let mut sorted_cursors = cursors_before.clone();
+        sorted_cursors.sort_by_key(|c| (c.min(), c.max()));
+
+        let mut deltas: Vec<TextDelta> = Vec::new();
+        let mut new_cursors: Vec<Cursor> = Vec::new();
+        let mut delta_offset: isize = 0;
+
+        for cursor in sorted_cursors {
+            let start = (cursor.min() as isize + delta_offset) as usize;
+            let end = (cursor.max() as isize + delta_offset) as usize;
+
+            if cursor.is_selection() {
+                if start < end && end <= tab.buffer.len_bytes() {
+                    let delta = tab.buffer.delete(start, end)?;
+                    deltas.push(delta);
+                    new_cursors.push(Cursor::new(start));
+                    delta_offset -= (end - start) as isize;
+                } else {
+                    new_cursors.push(Cursor::new(start));
+                }
+            } else if start > 0 && start <= tab.buffer.len_bytes() {
+                let char_idx = tab.buffer.byte_to_char(start);
+                let prev_byte = tab.buffer.char_to_byte(char_idx - 1);
+                let delta = tab.buffer.delete(prev_byte, start)?;
+                deltas.push(delta);
+                new_cursors.push(Cursor::new(prev_byte));
+                delta_offset -= (start - prev_byte) as isize;
+            } else {
+                new_cursors.push(Cursor::new(start));
+            }
+        }
+
+        if !deltas.is_empty() {
+            tab.cursors.set_cursors(new_cursors);
             let cursors_after = tab.cursors.cursors().to_vec();
             tab.history
-                .record_edit(delta, cursors_before, cursors_after);
-            self.record_edit_internal();
-        } else if primary.head > 0 {
-            let char_idx = tab.buffer.byte_to_char(primary.head);
-            let prev_byte = tab.buffer.char_to_byte(char_idx - 1);
-            let delta = tab.buffer.delete(prev_byte, primary.head)?;
-            tab.cursors.set_single(prev_byte);
-            let cursors_after = tab.cursors.cursors().to_vec();
-            tab.history
-                .record_edit(delta, cursors_before, cursors_after);
-            self.record_edit_internal();
+                .record_edits(deltas.clone(), cursors_before, cursors_after);
+            self.record_edit_internal(&deltas);
         }
 
         Ok(())
@@ -467,26 +726,46 @@ impl Editor {
 
     pub fn delete_forwards(&mut self) -> Result<(), BufferError> {
         let tab = &mut self.tabs[self.active_tab];
-        let primary = *tab.cursors.primary();
         let cursors_before = tab.cursors.cursors().to_vec();
 
-        if primary.is_selection() {
-            let start = primary.min();
-            let end = primary.max();
-            let delta = tab.buffer.delete(start, end)?;
-            tab.cursors.set_single(start);
+        let mut sorted_cursors = cursors_before.clone();
+        sorted_cursors.sort_by_key(|c| (c.min(), c.max()));
+
+        let mut deltas: Vec<TextDelta> = Vec::new();
+        let mut new_cursors: Vec<Cursor> = Vec::new();
+        let mut delta_offset: isize = 0;
+
+        for cursor in sorted_cursors {
+            let start = (cursor.min() as isize + delta_offset) as usize;
+            let end = (cursor.max() as isize + delta_offset) as usize;
+
+            if cursor.is_selection() {
+                if start < end && end <= tab.buffer.len_bytes() {
+                    let delta = tab.buffer.delete(start, end)?;
+                    deltas.push(delta);
+                    new_cursors.push(Cursor::new(start));
+                    delta_offset -= (end - start) as isize;
+                } else {
+                    new_cursors.push(Cursor::new(start));
+                }
+            } else if start < tab.buffer.len_bytes() {
+                let char_idx = tab.buffer.byte_to_char(start);
+                let next_byte = tab.buffer.char_to_byte(char_idx + 1);
+                let delta = tab.buffer.delete(start, next_byte)?;
+                deltas.push(delta);
+                new_cursors.push(Cursor::new(start));
+                delta_offset -= (next_byte - start) as isize;
+            } else {
+                new_cursors.push(Cursor::new(start));
+            }
+        }
+
+        if !deltas.is_empty() {
+            tab.cursors.set_cursors(new_cursors);
             let cursors_after = tab.cursors.cursors().to_vec();
             tab.history
-                .record_edit(delta, cursors_before, cursors_after);
-            self.record_edit_internal();
-        } else if primary.head < tab.buffer.len_bytes() {
-            let char_idx = tab.buffer.byte_to_char(primary.head);
-            let next_byte = tab.buffer.char_to_byte(char_idx + 1);
-            let delta = tab.buffer.delete(primary.head, next_byte)?;
-            let cursors_after = tab.cursors.cursors().to_vec();
-            tab.history
-                .record_edit(delta, cursors_before, cursors_after);
-            self.record_edit_internal();
+                .record_edits(deltas.clone(), cursors_before, cursors_after);
+            self.record_edit_internal(&deltas);
         }
 
         Ok(())
@@ -662,7 +941,7 @@ impl Editor {
         let tab = &mut self.tabs[self.active_tab];
         if let Some(cursors) = tab.history.undo(&mut tab.buffer) {
             tab.cursors.set_cursors(cursors);
-            self.record_edit_internal();
+            self.record_edit_internal(&[]);
             true
         } else {
             false
@@ -673,7 +952,7 @@ impl Editor {
         let tab = &mut self.tabs[self.active_tab];
         if let Some(cursors) = tab.history.redo(&mut tab.buffer) {
             tab.cursors.set_cursors(cursors);
-            self.record_edit_internal();
+            self.record_edit_internal(&[]);
             true
         } else {
             false
@@ -828,5 +1107,264 @@ mod tests {
         assert!(primary.is_selection());
         assert_eq!(primary.min(), 24);
         assert_eq!(primary.max(), 35);
+    }
+
+    #[test]
+    fn test_editor_overwrite_selection_single_undo() {
+        let mut ed = Editor::new();
+        ed.insert_str("Hello World").unwrap();
+
+        // Select "World" (bytes 6..11)
+        ed.cursors_mut().primary_mut().anchor = 6;
+        ed.cursors_mut().primary_mut().head = 11;
+        assert!(ed.cursors().primary().is_selection());
+
+        // Overwrite selection with "Rust"
+        ed.insert_str("Rust").unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "Hello Rust"
+        );
+
+        // A SINGLE undo must restore "Hello World" and original selection!
+        ed.undo();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "Hello World"
+        );
+        let primary = ed.cursors().primary();
+        assert_eq!(primary.min(), 6);
+        assert_eq!(primary.max(), 11);
+
+        // Redo restores "Hello Rust"
+        ed.redo();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "Hello Rust"
+        );
+    }
+
+    #[test]
+    fn test_editor_multi_cursor_simultaneous_editing_and_undo() {
+        let mut ed = Editor::new();
+        ed.insert_str("alpha beta gamma").unwrap();
+
+        // Set 3 cursors at the end of each word: after 'alpha' (5), after 'beta' (10), after 'gamma' (16)
+        ed.cursors_mut()
+            .set_cursors(vec![Cursor::new(5), Cursor::new(10), Cursor::new(16)]);
+        assert_eq!(ed.cursors().cursors().len(), 3);
+
+        // Simultaneous insert "_test" at all 3 cursors
+        ed.insert_str("_test").unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "alpha_test beta_test gamma_test"
+        );
+
+        // All 3 cursors should still exist and be properly positioned
+        assert_eq!(ed.cursors().cursors().len(), 3);
+        assert_eq!(ed.cursors().cursors()[0].head, 10); // 5 + 5
+        assert_eq!(ed.cursors().cursors()[1].head, 20); // 10 + 5 + 5
+        assert_eq!(ed.cursors().cursors()[2].head, 31); // 16 + 5 + 5 + 5
+
+        // Simultaneous delete backwards (delete 5 chars of "_test")
+        for _ in 0..5 {
+            ed.delete_backwards().unwrap();
+        }
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "alpha beta gamma"
+        );
+        assert_eq!(ed.cursors().cursors().len(), 3);
+        assert_eq!(ed.cursors().cursors()[0].head, 5);
+        assert_eq!(ed.cursors().cursors()[1].head, 10);
+        assert_eq!(ed.cursors().cursors()[2].head, 16);
+
+        // Undo 5 deletions, then undo insert
+        for _ in 0..5 {
+            ed.undo();
+        }
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "alpha_test beta_test gamma_test"
+        );
+
+        // One more undo reverses the multi-cursor insertion
+        ed.undo();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "alpha beta gamma"
+        );
+        assert_eq!(ed.cursors().cursors().len(), 3);
+        assert_eq!(ed.cursors().cursors()[0].head, 5);
+        assert_eq!(ed.cursors().cursors()[1].head, 10);
+        assert_eq!(ed.cursors().cursors()[2].head, 16);
+    }
+
+    #[test]
+    fn test_editor_async_autosave() {
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join(format!("lume_test_autosave_{}.txt", std::process::id()));
+
+        let mut ed = Editor::new();
+        ed.set_file_path(Some(file_path.clone()));
+        ed.autosave_controller_mut().config.debounce = std::time::Duration::from_millis(0);
+
+        ed.insert_str("async autosave content").unwrap();
+        assert!(ed.is_dirty());
+
+        let triggered = ed.check_autosave();
+        assert!(triggered);
+
+        for _ in 0..50 {
+            let _ = ed.poll_async_saves();
+            if !ed.is_dirty() && file_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    if content == "async autosave content" {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(!ed.is_dirty());
+        assert!(file_path.exists());
+        let read_back = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(read_back, "async autosave content");
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_async_save_preserves_journal_for_newer_edits() {
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join(format!(
+            "lume_test_autosave_journal_race_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&file_path, "base").unwrap();
+
+        let mut ed = Editor::open(&file_path).unwrap();
+        ed.set_cursor_from_line_col(0, 4, false);
+        ed.insert_str(" + edit1").unwrap();
+        assert_eq!(ed.revision(), 1);
+        assert!(Journal::has_journal(&file_path));
+
+        // Trigger async save at revision 1
+        ed.save_async().unwrap();
+
+        // User continues typing (revision 2) before/while async save finishes
+        ed.insert_str(" + edit2").unwrap();
+        assert_eq!(ed.revision(), 2);
+
+        // Wait for async save of revision 1 to complete
+        for _ in 0..50 {
+            let events = ed.poll_async_saves();
+            if !events.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Tab must still be dirty and journal must NOT be deleted because revision 2 > save_revision 1
+        assert!(ed.is_dirty());
+        assert!(
+            Journal::has_journal(&file_path),
+            "Journal for newer edits must not be deleted by older background save"
+        );
+
+        // Recovering from journal must include edit2
+        let recovered = Editor::open(&file_path).unwrap();
+        assert_eq!(
+            recovered
+                .buffer()
+                .slice_to_cow(0, recovered.buffer().len_bytes()),
+            "base + edit1 + edit2"
+        );
+
+        let _ = Journal::remove(&file_path);
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_async_save_failure_keeps_dirty_and_reports_error() {
+        // Point to a path inside a regular file (so creating parent directory fails with I/O error)
+        let tmp_dir = std::env::temp_dir();
+        let blocker_file = tmp_dir.join(format!("lume_blocker_file_{}", std::process::id()));
+        std::fs::write(&blocker_file, "not a directory").unwrap();
+        let invalid_target = blocker_file.join("subdir").join("cannot_write.txt");
+
+        let mut ed = Editor::new();
+        ed.set_file_path(Some(invalid_target.clone()));
+        ed.insert_str("important unsaved data").unwrap();
+        assert!(ed.is_dirty());
+
+        ed.save_async().unwrap();
+        // Immediately after save_async, buffer must remain dirty
+        assert!(ed.is_dirty());
+
+        let mut received_err = false;
+        for _ in 0..50 {
+            let events = ed.poll_async_saves();
+            if let Some(ev) = events.first() {
+                assert!(ev.result.is_err());
+                received_err = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(received_err, "Expected async save I/O error event");
+        assert!(ed.is_dirty(), "Tab must remain dirty when async save fails");
+
+        let _ = Journal::remove(&invalid_target);
+        let _ = std::fs::remove_file(&blocker_file);
+    }
+
+    #[test]
+    fn test_close_dirty_tab_preserves_journal() {
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join(format!("lume_close_dirty_tab_{}.txt", std::process::id()));
+        std::fs::write(&file_path, "initial content").unwrap();
+
+        let mut ed = Editor::open(&file_path).unwrap();
+        ed.insert_str("unsaved prefix ").unwrap();
+        assert!(ed.is_dirty());
+        assert!(Journal::has_journal(&file_path));
+
+        // Closing a dirty tab must NOT delete the crash recovery journal
+        ed.close_tab(0);
+        assert!(Journal::has_journal(&file_path));
+
+        // Re-opening recovers the unsaved edits
+        let recovered = Editor::open(&file_path).unwrap();
+        assert_eq!(
+            recovered
+                .buffer()
+                .slice_to_cow(0, recovered.buffer().len_bytes()),
+            "unsaved prefix initial content"
+        );
+
+        let _ = Journal::remove(&file_path);
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_multi_cursor_out_of_bounds_selection_delta_offset() {
+        let mut ed = Editor::new();
+        ed.insert_str("0123456789").unwrap();
+
+        ed.cursors_mut()
+            .set_cursors(vec![Cursor::new(2), Cursor::new(5)]);
+        // Mutate primary cursor selection past the end of the buffer
+        ed.cursors_mut().primary_mut().head = 20;
+
+        // Inserting "X" skips out-of-bounds deletion on cursor 1 and must only shift cursor 2 by +1
+        ed.insert_str("X").unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "01X234X56789"
+        );
     }
 }

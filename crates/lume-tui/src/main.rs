@@ -1,8 +1,12 @@
+mod explorer;
+mod prompt;
+
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute, queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
@@ -11,18 +15,22 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
+use explorer::FileExplorer;
 use lume_core::{Editor, TextBuffer};
-use lume_syntax::{HighlightToken, Language, SyntaxHighlighter, TokenType};
+use lume_syntax::{HighlightToken, Language, SyntaxRequest, SyntaxWorker, TokenType};
+use prompt::{InputPrompt, PromptAction};
 use std::collections::HashMap;
 use std::env;
 use std::io::{stdout, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 enum AppEvent {
     Input(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    FocusLost,
 }
 
 struct TerminalGuard;
@@ -31,7 +39,13 @@ impl TerminalGuard {
     fn init() -> Result<Self, std::io::Error> {
         enable_raw_mode()?;
         let mut out = stdout();
-        execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
+        execute!(
+            out,
+            EnterAlternateScreen,
+            Hide,
+            EnableMouseCapture,
+            EnableFocusChange
+        )?;
         Ok(Self)
     }
 }
@@ -43,11 +57,18 @@ impl Drop for TerminalGuard {
             out,
             Show,
             ResetColor,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveFocus {
+    Editor,
+    Explorer,
 }
 
 #[derive(Clone, Debug)]
@@ -59,9 +80,29 @@ struct CommandItem {
 
 const COMMANDS: &[CommandItem] = &[
     CommandItem {
+        id: "file.open",
+        title: "File: Open File...",
+        shortcut: "Ctrl+O",
+    },
+    CommandItem {
         id: "file.save",
         title: "File: Save",
         shortcut: "Ctrl+S",
+    },
+    CommandItem {
+        id: "file.save_as",
+        title: "File: Save As...",
+        shortcut: "Ctrl+Shift+S",
+    },
+    CommandItem {
+        id: "view.toggle_explorer",
+        title: "View: Toggle File Explorer",
+        shortcut: "Ctrl+B / F2",
+    },
+    CommandItem {
+        id: "language.set_mode",
+        title: "Language: Change Language Mode",
+        shortcut: "Ctrl+K M",
     },
     CommandItem {
         id: "file.new_tab",
@@ -112,6 +153,8 @@ const COMMANDS: &[CommandItem] = &[
 
 pub struct App {
     pub editor: Editor,
+    pub explorer: FileExplorer,
+    pub focus: ActiveFocus,
     pub scroll_row: usize,
     pub scroll_col: usize,
     pub terminal_width: u16,
@@ -126,14 +169,19 @@ pub struct App {
     last_click_pos: (u16, u16),
     click_count: u8,
 
-    // Overlays: Command Palette & Which-Key
+    // Overlays: Command Palette, Which-Key & Input Prompt
     pub palette_open: bool,
     pub palette_query: String,
     pub palette_selected: usize,
     pub which_key_open: bool,
+    pub prompt: Option<InputPrompt>,
 
-    // Syntax highlighters cache
-    highlighters: HashMap<Language, SyntaxHighlighter>,
+    // Syntax worker & cache
+    pub syntax_worker: SyntaxWorker,
+    pub syntax_cache: HashMap<usize, (u64, Arc<Vec<HighlightToken>>)>,
+    pub syntax_in_flight: HashMap<usize, u64>,
+    syntax_range_cache: HashMap<usize, std::ops::Range<usize>>,
+    syntax_in_flight_range: HashMap<usize, std::ops::Range<usize>>,
 }
 
 impl App {
@@ -150,10 +198,14 @@ impl App {
             Editor::new()
         };
 
+        let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let explorer = FileExplorer::new(current_dir);
         let (width, height) = terminal_size().unwrap_or((80, 24));
 
         Ok(Self {
             editor,
+            explorer,
+            focus: ActiveFocus::Editor,
             scroll_row: 0,
             scroll_col: 0,
             terminal_width: width,
@@ -171,13 +223,30 @@ impl App {
             palette_query: String::new(),
             palette_selected: 0,
             which_key_open: false,
+            prompt: None,
 
-            highlighters: HashMap::new(),
+            syntax_worker: SyntaxWorker::spawn(),
+            syntax_cache: HashMap::new(),
+            syntax_in_flight: HashMap::new(),
+            syntax_range_cache: HashMap::new(),
+            syntax_in_flight_range: HashMap::new(),
         })
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn explorer_width(&self) -> usize {
+        if self.explorer.is_visible {
+            self.explorer.width
+        } else {
+            0
+        }
+    }
+
+    pub fn text_area_left(&self) -> usize {
+        self.explorer_width()
     }
 
     fn text_area_top(&self) -> usize {
@@ -195,12 +264,13 @@ impl App {
         }
         let total_lines = self.editor.buffer().len_lines().max(1);
         let digits = format!("{}", total_lines).len();
-        digits + 3 // digits + 1 space + '|' + 1 space
+        digits + 3 // digits + 1 space + '│' + 1 space
     }
 
     fn text_area_width(&self) -> usize {
         let gutter = self.gutter_width();
-        (self.terminal_width as usize).saturating_sub(gutter)
+        let exp_w = self.explorer_width();
+        (self.terminal_width as usize).saturating_sub(gutter + exp_w)
     }
 
     fn adjust_viewport(&mut self) {
@@ -221,26 +291,114 @@ impl App {
         }
     }
 
-    fn current_language(&self) -> Option<Language> {
-        self.editor.file_path().and_then(Language::from_path)
+    pub fn current_language(&self) -> Option<Language> {
+        if let Some(override_id) = self.editor.language_override() {
+            Language::from_id(override_id)
+        } else {
+            self.editor.file_path().and_then(Language::from_path)
+        }
     }
 
-    fn compute_highlights(
-        &mut self,
-        start_byte: usize,
-        end_byte: usize,
-        text: &str,
-    ) -> Vec<HighlightToken> {
-        if let Some(lang) = self.current_language() {
-            let highlighter = self
-                .highlighters
-                .entry(lang)
-                .or_insert_with(|| SyntaxHighlighter::new(lang).unwrap());
-            highlighter.update(text);
-            highlighter.highlight_range(start_byte, end_byte, text)
-        } else {
-            Vec::new()
+    pub fn has_pending_syntax_response(&mut self) -> bool {
+        let mut updated = false;
+        while let Some(res) = self.syntax_worker.try_recv_response() {
+            let is_newer = self
+                .syntax_cache
+                .get(&res.buffer_id)
+                .map(|(rev, _)| res.revision >= *rev)
+                .unwrap_or(true);
+            if is_newer {
+                self.syntax_cache
+                    .insert(res.buffer_id, (res.revision, Arc::new(res.tokens)));
+                self.syntax_in_flight.remove(&res.buffer_id);
+                if let Some(range) = self.syntax_in_flight_range.remove(&res.buffer_id) {
+                    self.syntax_range_cache.insert(res.buffer_id, range);
+                }
+                if res.buffer_id == self.editor.active_tab().id {
+                    updated = true;
+                }
+            }
         }
+        updated
+    }
+
+    pub fn poll_async_saves(&mut self) -> bool {
+        let events = self.editor.poll_async_saves();
+        let mut updated = false;
+        for ev in events {
+            updated = true;
+            match ev.result {
+                Ok(()) => {
+                    self.set_status("Autosaved");
+                }
+                Err(err) => {
+                    self.set_status(format!("Save error: {}", err));
+                }
+            }
+        }
+        updated
+    }
+
+    fn update_syntax_highlights(&mut self) -> Arc<Vec<HighlightToken>> {
+        let _ = self.has_pending_syntax_response();
+
+        let text_area_h = self.text_area_height();
+        let active_tab = self.editor.active_tab();
+        let tab_id = active_tab.id;
+        let tab_rev = active_tab.revision;
+        let total_lines = active_tab.buffer.len_lines();
+
+        let vis_start_line = self.scroll_row.min(total_lines);
+        let vis_end_line = (self.scroll_row + text_area_h).min(total_lines);
+        let vis_start_byte = active_tab.buffer.line_to_byte(vis_start_line);
+        let vis_end_byte = active_tab.buffer.line_to_byte(vis_end_line);
+
+        let chunk_start_line = self.scroll_row.saturating_sub(64).min(total_lines);
+        let chunk_end_line = (self.scroll_row + text_area_h + 64).min(total_lines);
+        let chunk_start_byte = active_tab.buffer.line_to_byte(chunk_start_line);
+        let chunk_end_byte = active_tab.buffer.line_to_byte(chunk_end_line);
+
+        let range_covered = self
+            .syntax_range_cache
+            .get(&tab_id)
+            .is_some_and(|r| vis_start_byte >= r.start && vis_end_byte <= r.end);
+
+        let needs_request = match self.syntax_cache.get(&tab_id) {
+            Some((cached_rev, _)) => *cached_rev != tab_rev || !range_covered,
+            None => true,
+        };
+
+        let in_flight_matches = self.syntax_in_flight.get(&tab_id) == Some(&tab_rev)
+            && self
+                .syntax_in_flight_range
+                .get(&tab_id)
+                .is_some_and(|r| vis_start_byte >= r.start && vis_end_byte <= r.end);
+
+        if needs_request && !in_flight_matches {
+            if let Some(lang) = self.current_language() {
+                let chunk_text = self
+                    .editor
+                    .buffer()
+                    .slice_to_cow(chunk_start_byte, chunk_end_byte)
+                    .into_owned();
+                let visible_range = chunk_start_byte..chunk_end_byte;
+                self.syntax_in_flight.insert(tab_id, tab_rev);
+                self.syntax_in_flight_range
+                    .insert(tab_id, visible_range.clone());
+                self.syntax_worker.send_request(SyntaxRequest {
+                    buffer_id: tab_id,
+                    revision: tab_rev,
+                    language: lang,
+                    text: chunk_text,
+                    visible_range,
+                });
+            }
+        }
+
+        self.syntax_cache
+            .get(&tab_id)
+            .map(|(_, tokens)| Arc::clone(tokens))
+            .unwrap_or_else(|| Arc::new(Vec::new()))
     }
 
     pub fn render<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
@@ -249,15 +407,27 @@ impl App {
         let gutter_w = self.gutter_width();
         let text_h = self.text_area_height();
         let text_w = self.text_area_width();
+        let text_left = self.text_area_left();
         let total_lines = self.editor.buffer().len_lines();
         let active_tab_idx = self.editor.active_tab_idx();
 
-        queue!(writer, MoveTo(0, 0), Clear(ClearType::All))?;
+        queue!(writer, MoveTo(0, 0))?;
 
-        // 1. Render Tab Bar (Row 0)
+        // 1. Render File Explorer (if visible)
+        if self.explorer.is_visible {
+            let is_exp_focused = self.focus == ActiveFocus::Explorer;
+            self.explorer.render(
+                writer,
+                0,
+                self.terminal_height.saturating_sub(1) as usize,
+                is_exp_focused,
+            )?;
+        }
+
+        // 2. Render Tab Bar (Row 0, starting from text_left)
         queue!(
             writer,
-            MoveTo(0, 0),
+            MoveTo(text_left as u16, 0),
             SetBackgroundColor(Color::Rgb {
                 r: 30,
                 g: 30,
@@ -278,26 +448,13 @@ impl App {
         }
         tab_header.push_str(" [ + ]");
 
-        let width = self.terminal_width as usize;
-        let tab_bar_fill = format!("{:width$}", tab_header, width = width);
-        let tab_bar_trimmed: String = tab_bar_fill.chars().take(width).collect();
+        let tab_bar_w = (self.terminal_width as usize).saturating_sub(text_left);
+        let tab_bar_fill = format!("{:width$}", tab_header, width = tab_bar_w);
+        let tab_bar_trimmed: String = tab_bar_fill.chars().take(tab_bar_w).collect();
         queue!(writer, Print(tab_bar_trimmed), ResetColor)?;
 
-        // 2. Syntax tokens for the visible range
-        let full_text = self
-            .editor
-            .buffer()
-            .slice_to_cow(0, self.editor.buffer().len_bytes())
-            .to_string();
-        let start_byte = self.editor.buffer().line_to_byte(self.scroll_row);
-        let end_line = (self.scroll_row + text_h).min(total_lines);
-        let end_byte = if end_line < total_lines {
-            self.editor.buffer().line_to_byte(end_line)
-        } else {
-            self.editor.buffer().len_bytes()
-        };
-
-        let tokens = self.compute_highlights(start_byte, end_byte, &full_text);
+        // 3. Syntax tokens from background worker cache (re-parsed asynchronously off UI thread)
+        let tokens = self.update_syntax_highlights();
         let primary_cursor = *self.editor.cursors().primary();
         let selection_range = if primary_cursor.is_selection() {
             Some(primary_cursor.min()..primary_cursor.max())
@@ -305,11 +462,11 @@ impl App {
             None
         };
 
-        // 3. Render Text Area (Rows 1..1+text_h)
+        // 4. Render Text Area (Rows 1..1+text_h)
         for screen_row in 0..text_h {
             let buffer_line = self.scroll_row + screen_row;
             let term_row = (self.text_area_top() + screen_row) as u16;
-            queue!(writer, MoveTo(0, term_row))?;
+            queue!(writer, MoveTo(text_left as u16, term_row))?;
 
             if buffer_line < total_lines {
                 // Line numbers gutter
@@ -337,6 +494,12 @@ impl App {
                         }
                     }
 
+                    let line_end_byte = line_start_byte + line_str.len();
+                    let start_tok = tokens.partition_point(|t| t.end_byte <= line_start_byte);
+                    let rest_tokens = &tokens[start_tok..];
+                    let end_tok = rest_tokens.partition_point(|t| t.start_byte < line_end_byte);
+                    let line_tokens = &rest_tokens[..end_tok];
+
                     let chars: Vec<char> = line_str.chars().collect();
                     let mut current_byte = line_start_byte;
 
@@ -360,11 +523,19 @@ impl App {
                                 SetForegroundColor(Color::White)
                             )?;
                         } else {
-                            // Syntax color
-                            let token_type = tokens
-                                .iter()
-                                .find(|t| char_byte >= t.start_byte && char_byte < t.end_byte)
-                                .map(|t| t.token_type);
+                            // Syntax color via binary search on current line's tokens
+                            let token_type = line_tokens
+                                .binary_search_by(|t| {
+                                    if char_byte < t.start_byte {
+                                        std::cmp::Ordering::Greater
+                                    } else if char_byte >= t.end_byte {
+                                        std::cmp::Ordering::Less
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                })
+                                .ok()
+                                .map(|idx| line_tokens[idx].token_type);
 
                             let fg = match token_type {
                                 Some(TokenType::Keyword) => Color::Cyan,
@@ -382,19 +553,19 @@ impl App {
                         queue!(writer, Print(c), ResetColor)?;
                     }
                 }
-            } else {
-                if self.show_line_numbers {
-                    queue!(
-                        writer,
-                        SetForegroundColor(Color::DarkGrey),
-                        Print(format!("{:>width$} ~ ", "~", width = gutter_w - 3)),
-                        ResetColor
-                    )?;
-                }
+            } else if self.show_line_numbers {
+                queue!(
+                    writer,
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!("{:>width$} ~ ", "~", width = gutter_w - 3)),
+                    ResetColor
+                )?;
             }
+
+            queue!(writer, Clear(ClearType::UntilNewLine))?;
         }
 
-        // 4. Render Status Bar (Last Row)
+        // 5. Render Status Bar (Last Row)
         let status_row = self.terminal_height.saturating_sub(1);
         queue!(
             writer,
@@ -408,15 +579,23 @@ impl App {
         let dirty_flag = if self.editor.is_dirty() { " [*]" } else { "" };
         let lang_str = self
             .current_language()
-            .map(|l| match l {
-                Language::C => "C",
-                Language::Rust => "Rust",
-                Language::Python => "Python",
-            })
+            .map(|l| l.name())
             .unwrap_or("Plain Text");
 
+        let exp_indicator = if self.explorer.is_visible {
+            "[Explorer ON] "
+        } else {
+            "[Explorer OFF] "
+        };
+
         let left_status = format!(
-            " LUME │ Tab {}/{} │ {}{} │ Ln {}, Col {} │ {}",
+            " LUME │ {}{} │ Tab {}/{} │ {}{} │ Ln {}, Col {} │ {}",
+            exp_indicator,
+            if self.focus == ActiveFocus::Explorer {
+                "(Explorer Active)"
+            } else {
+                "(Editor)"
+            },
             active_tab_idx + 1,
             self.editor.tabs().len(),
             file_name,
@@ -430,12 +609,14 @@ impl App {
             if time.elapsed() < Duration::from_secs(4) {
                 format!("{} ", msg)
             } else {
-                "F1: Shortcuts │ Ctrl+P: Palette │ Ctrl+S: Save │ Ctrl+Q: Quit ".to_string()
+                "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help "
+                    .to_string()
             }
         } else {
-            "F1: Shortcuts │ Ctrl+P: Palette │ Ctrl+S: Save │ Ctrl+Q: Quit ".to_string()
+            "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help ".to_string()
         };
 
+        let width = self.terminal_width as usize;
         let spaces = width.saturating_sub(left_status.len() + right_status.len());
         let bar = format!(
             "{}{:width$}{}",
@@ -447,24 +628,27 @@ impl App {
         let bar_trimmed: String = bar.chars().take(width).collect();
         queue!(writer, Print(bar_trimmed), ResetColor)?;
 
-        // 5. Render Command Palette Modal (if open)
-        if self.palette_open {
+        // 6. Overlays
+        if let Some(ref prompt) = self.prompt {
+            prompt.render(writer, self.terminal_width, self.terminal_height)?;
+        } else if self.palette_open {
             self.render_command_palette(writer)?;
-        }
-
-        // 6. Render Which-Key Modal (if open)
-        if self.which_key_open {
+        } else if self.which_key_open {
             self.render_which_key(writer)?;
         }
 
-        // Position terminal cursor
-        if !self.palette_open && !self.which_key_open {
-            let term_cursor_row =
-                (self.text_area_top() + cursor_row.saturating_sub(self.scroll_row)) as u16;
-            let term_cursor_col = (gutter_w + cursor_col.saturating_sub(self.scroll_col)) as u16;
-            queue!(writer, MoveTo(term_cursor_col, term_cursor_row), Show)?;
-        } else {
-            queue!(writer, Hide)?;
+        // 7. Position terminal cursor
+        if self.prompt.is_none() && !self.palette_open && !self.which_key_open {
+            if self.focus == ActiveFocus::Editor {
+                let term_cursor_row =
+                    (self.text_area_top() + cursor_row.saturating_sub(self.scroll_row)) as u16;
+                let term_cursor_col =
+                    (text_left + gutter_w + cursor_col.saturating_sub(self.scroll_col)) as u16;
+                queue!(writer, MoveTo(term_cursor_col, term_cursor_row), Show)?;
+            } else {
+                // Focus in explorer: hide terminal cursor, row selection handles highlight
+                queue!(writer, Hide)?;
+            }
         }
 
         writer.flush()?;
@@ -486,8 +670,8 @@ impl App {
     }
 
     fn render_command_palette<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        let box_w = (self.terminal_width as usize).clamp(30, 64);
-        let box_h = 10;
+        let box_w = (self.terminal_width as usize).clamp(36, 68);
+        let box_h = 11;
         let start_x = (self.terminal_width as usize).saturating_sub(box_w) / 2;
         let start_y = (self.terminal_height as usize).saturating_sub(box_h) / 3;
 
@@ -582,19 +766,20 @@ impl App {
     }
 
     fn render_which_key<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        let box_w = (self.terminal_width as usize).clamp(40, 76);
-        let box_h = 8;
+        let box_w = (self.terminal_width as usize).clamp(44, 80);
+        let box_h = 9;
         let start_x = (self.terminal_width as usize).saturating_sub(box_w) / 2;
         let start_y = (self.terminal_height as usize).saturating_sub(box_h) / 2;
 
         let lines = [
-            " LUME WHICH-KEY SHORTCUTS (Press any key or Esc to close) ",
-            " [File]      Ctrl+S: Save   │ Ctrl+T: New Tab   │ Ctrl+W: Close Tab ",
-            " [Nav]       Ctrl+Tab / Alt+Right: Next Tab     │ Alt+Left: Prev Tab ",
+            " LUME SHORTCUTS CHEAT SHEET (Press any key or Esc to close) ",
+            " [File]      Ctrl+O: Open   │ Ctrl+S: Save      │ Ctrl+Shift+S: Save As ",
+            " [Tabs]      Ctrl+T: New    │ Ctrl+W: Close     │ Ctrl+Tab / Alt+Left/Right: Switch ",
+            " [Explorer]  Ctrl+B / F2: Toggle Explorer       │ Up/Down/Enter/Left/Right: Nav ",
             " [Edit]      Ctrl+Z: Undo   │ Ctrl+Y: Redo      │ Backspace / Del ",
             " [Cursor]    Arrows: Move   │ Shift+Arrows: Select │ Home / End ",
-            " [Mouse]     Click: Position │ 2xClick: Word │ 3xClick: Line │ Drag: Sel ",
-            " [Features]  Ctrl+P: Command Palette │ F1: Which-Key Overlay ",
+            " [Mouse]     Click: Position/Open │ 2xClick: Word │ 3xClick: Line │ Drag: Sel ",
+            " [Features]  Ctrl+P: Command Palette            │ F1: Which-Key Overlay ",
             " [Quit]      Ctrl+Q: Exit Lume ",
         ];
 
@@ -619,10 +804,46 @@ impl App {
 
     pub fn execute_command(&mut self, id: &str) {
         match id {
-            "file.save" => match self.editor.save() {
-                Ok(()) => self.set_status("File saved successfully"),
-                Err(e) => self.set_status(format!("Save error: {}", e)),
-            },
+            "file.open" => {
+                self.prompt = Some(InputPrompt::open_file());
+            }
+            "file.save" => {
+                if self.editor.file_path().is_some() {
+                    match self.editor.save() {
+                        Ok(()) => self.set_status("File saved successfully"),
+                        Err(e) => self.set_status(format!("Save error: {}", e)),
+                    }
+                } else {
+                    self.prompt = Some(InputPrompt::save_as(None));
+                }
+            }
+            "file.save_as" => {
+                let default_name = self
+                    .editor
+                    .file_path()
+                    .map(|p| p.to_string_lossy().to_string());
+                self.prompt = Some(InputPrompt::save_as(default_name.as_deref()));
+            }
+            "view.toggle_explorer" => {
+                self.explorer.toggle_visible();
+                if self.explorer.is_visible {
+                    self.focus = ActiveFocus::Explorer;
+                } else {
+                    self.focus = ActiveFocus::Editor;
+                }
+                self.set_status(format!(
+                    "File Explorer: {}",
+                    if self.explorer.is_visible {
+                        "OPEN"
+                    } else {
+                        "CLOSED"
+                    }
+                ));
+            }
+            "language.set_mode" => {
+                let langs: Vec<&'static str> = Language::all().iter().map(|l| l.name()).collect();
+                self.prompt = Some(InputPrompt::set_language(&langs));
+            }
             "file.new_tab" => {
                 let idx = self.editor.new_tab();
                 self.set_status(format!("Opened new Tab {}", idx + 1));
@@ -662,11 +883,15 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> std::io::Result<()> {
+        if key.kind == KeyEventKind::Release {
+            return Ok(());
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        // If Which-Key overlay is open, any key dismisses it
+        // 1. If Which-Key overlay is open, any key dismisses it
         if self.which_key_open {
             self.which_key_open = false;
             if key.code == KeyCode::Esc || key.code == KeyCode::F(1) {
@@ -674,7 +899,115 @@ impl App {
             }
         }
 
-        // If Command Palette is open, route keys to palette
+        // 2. If an Input Prompt is open (Open File, Save As, Language Mode)
+        if let Some(mut prompt) = self.prompt.take() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.set_status("Cancelled");
+                }
+                KeyCode::Enter => {
+                    let val = prompt.value.trim().to_string();
+                    match prompt.action {
+                        PromptAction::OpenFile => {
+                            if !val.is_empty() {
+                                let path = PathBuf::from(&val);
+                                if path.exists() {
+                                    match self.editor.open_or_load(&path) {
+                                        Ok(_) => {
+                                            self.focus = ActiveFocus::Editor;
+                                            self.set_status(format!("Opened {}", path.display()));
+                                        }
+                                        Err(e) => self.set_status(format!("Open error: {}", e)),
+                                    }
+                                } else {
+                                    self.set_status(format!("File not found: {}", path.display()));
+                                }
+                            }
+                        }
+                        PromptAction::SaveFileAs => {
+                            if !val.is_empty() {
+                                let path = PathBuf::from(&val);
+                                match self.editor.save_as(&path) {
+                                    Ok(()) => {
+                                        self.explorer.refresh();
+                                        self.set_status(format!("Saved to {}", path.display()));
+                                    }
+                                    Err(e) => self.set_status(format!("Save error: {}", e)),
+                                }
+                            }
+                        }
+                        PromptAction::SetLanguage => {
+                            let chosen = if !prompt.suggestions.is_empty()
+                                && prompt.selected_suggestion < prompt.suggestions.len()
+                                && (val.is_empty()
+                                    || prompt.suggestions[prompt.selected_suggestion]
+                                        .to_lowercase()
+                                        .starts_with(&val.to_lowercase()))
+                            {
+                                prompt.suggestions[prompt.selected_suggestion].clone()
+                            } else {
+                                val.clone()
+                            };
+
+                            if let Some(lang) = Language::from_id(&chosen) {
+                                self.editor
+                                    .set_language_override(Some(lang.name().to_string()));
+                                self.syntax_cache.remove(&self.editor.active_tab().id);
+                                self.syntax_in_flight.remove(&self.editor.active_tab().id);
+                                self.set_status(format!("Language mode: {}", lang.name()));
+                            } else if chosen.to_lowercase() == "plain text" {
+                                self.editor.set_language_override(None);
+                                self.syntax_cache.remove(&self.editor.active_tab().id);
+                                self.syntax_in_flight.remove(&self.editor.active_tab().id);
+                                self.set_status("Language mode: Plain Text");
+                            } else {
+                                self.set_status(format!("Unknown language: {}", chosen));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Tab => {
+                    prompt.autocomplete();
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Backspace => {
+                    prompt.handle_backspace();
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Left => {
+                    prompt.move_left();
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Right => {
+                    prompt.move_right();
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Up => {
+                    if prompt.selected_suggestion > 0 {
+                        prompt.selected_suggestion -= 1;
+                    }
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Down => {
+                    if !prompt.suggestions.is_empty()
+                        && prompt.selected_suggestion + 1 < prompt.suggestions.len()
+                    {
+                        prompt.selected_suggestion += 1;
+                    }
+                    self.prompt = Some(prompt);
+                }
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    prompt.handle_char(c);
+                    self.prompt = Some(prompt);
+                }
+                _ => {
+                    self.prompt = Some(prompt);
+                }
+            }
+            return Ok(());
+        }
+
+        // 3. If Command Palette is open, route keys to palette
         if self.palette_open {
             match key.code {
                 KeyCode::Esc => {
@@ -714,40 +1047,119 @@ impl App {
             return Ok(());
         }
 
-        // Normal Editor key handling
-        match (key.code, ctrl, alt) {
-            (KeyCode::Char('q'), true, false) => {
-                self.running = false;
+        // 4. Global Shortcuts
+        if ctrl && !alt {
+            match key.code {
+                KeyCode::Char('q') => {
+                    self.running = false;
+                    return Ok(());
+                }
+                KeyCode::Char('p') => {
+                    self.palette_open = true;
+                    self.palette_query.clear();
+                    self.palette_selected = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('o') => {
+                    self.execute_command("file.open");
+                    return Ok(());
+                }
+                KeyCode::Char('s') => {
+                    if shift {
+                        self.execute_command("file.save_as");
+                    } else {
+                        self.execute_command("file.save");
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('S') => {
+                    self.execute_command("file.save_as");
+                    return Ok(());
+                }
+                KeyCode::Char('b') | KeyCode::Char('e') => {
+                    self.execute_command("view.toggle_explorer");
+                    return Ok(());
+                }
+                KeyCode::Char('t') => {
+                    self.execute_command("file.new_tab");
+                    return Ok(());
+                }
+                KeyCode::Char('w') => {
+                    self.execute_command("file.close_tab");
+                    return Ok(());
+                }
+                KeyCode::Tab => {
+                    self.editor.next_tab();
+                    return Ok(());
+                }
+                KeyCode::Char('z') => {
+                    self.execute_command("edit.undo");
+                    return Ok(());
+                }
+                KeyCode::Char('y') => {
+                    self.execute_command("edit.redo");
+                    return Ok(());
+                }
+                _ => {}
             }
-            (KeyCode::Char('p'), true, false) => {
-                self.palette_open = true;
-                self.palette_query.clear();
-                self.palette_selected = 0;
-            }
-            (KeyCode::F(1), false, false) => {
+        }
+
+        match key.code {
+            KeyCode::F(1) => {
                 self.which_key_open = true;
+                return Ok(());
             }
-            (KeyCode::Char('s'), true, false) => {
-                self.execute_command("file.save");
+            KeyCode::F(2) => {
+                self.execute_command("view.toggle_explorer");
+                return Ok(());
             }
-            (KeyCode::Char('t'), true, false) => {
-                self.execute_command("file.new_tab");
-            }
-            (KeyCode::Char('w'), true, false) => {
-                self.execute_command("file.close_tab");
-            }
-            (KeyCode::Tab, true, false) | (KeyCode::Right, false, true) => {
+            KeyCode::Right if alt => {
                 self.editor.next_tab();
+                return Ok(());
             }
-            (KeyCode::Left, false, true) => {
+            KeyCode::Left if alt => {
                 self.editor.prev_tab();
+                return Ok(());
             }
-            (KeyCode::Char('z'), true, false) => {
-                self.execute_command("edit.undo");
+            _ => {}
+        }
+
+        // 5. If File Explorer is Focused
+        if self.focus == ActiveFocus::Explorer && self.explorer.is_visible {
+            match key.code {
+                KeyCode::Up => {
+                    self.explorer.move_up();
+                }
+                KeyCode::Down => {
+                    self.explorer.move_down(self.text_area_height());
+                }
+                KeyCode::Left => {
+                    self.explorer.collapse_selected();
+                }
+                KeyCode::Right => {
+                    self.explorer.expand_selected();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(path) = self.explorer.activate_selected() {
+                        match self.editor.open_or_load(&path) {
+                            Ok(_) => {
+                                self.focus = ActiveFocus::Editor;
+                                self.set_status(format!("Opened {}", path.display()));
+                            }
+                            Err(e) => self.set_status(format!("Open error: {}", e)),
+                        }
+                    }
+                }
+                KeyCode::Tab | KeyCode::Esc => {
+                    self.focus = ActiveFocus::Editor;
+                }
+                _ => {}
             }
-            (KeyCode::Char('y'), true, false) => {
-                self.execute_command("edit.redo");
-            }
+            return Ok(());
+        }
+
+        // 6. Normal Editor key handling
+        match (key.code, ctrl, alt) {
             (KeyCode::Left, false, false) => self.editor.move_left(shift),
             (KeyCode::Right, false, false) => self.editor.move_right(shift),
             (KeyCode::Up, false, false) => self.editor.move_up(shift),
@@ -778,21 +1190,57 @@ impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> std::io::Result<()> {
         let col = mouse.column as usize;
         let row = mouse.row as usize;
+        let exp_w = self.explorer_width();
         let gutter_w = self.gutter_width();
         let status_row = self.terminal_height.saturating_sub(1) as usize;
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Click in Tab Bar (Row 0)
-                if row == 0 {
-                    self.handle_tab_bar_click(col);
+                // Click in status bar (Row status_row)
+                if row == status_row {
+                    // Click on language area (Ln ..., Col ... | <Lang>)
+                    self.execute_command("language.set_mode");
                     return Ok(());
                 }
 
-                // Click in text editing area
+                // Click in Tab Bar (Row 0)
+                if row == 0 {
+                    if col < exp_w {
+                        // Click in explorer header: toggle focus or refresh
+                        self.focus = ActiveFocus::Explorer;
+                        self.explorer.refresh();
+                    } else {
+                        self.focus = ActiveFocus::Editor;
+                        self.handle_tab_bar_click(col.saturating_sub(exp_w));
+                    }
+                    return Ok(());
+                }
+
+                // Click in main body (Rows 1..status_row)
                 if row >= self.text_area_top() && row < status_row {
+                    if col < exp_w && self.explorer.is_visible {
+                        // Click in File Explorer
+                        self.focus = ActiveFocus::Explorer;
+                        let rel_row = row - self.text_area_top();
+                        if let Some(path) = self.explorer.click_at(rel_row) {
+                            match self.editor.open_or_load(&path) {
+                                Ok(_) => {
+                                    self.focus = ActiveFocus::Editor;
+                                    self.set_status(format!("Opened {}", path.display()));
+                                }
+                                Err(e) => self.set_status(format!("Open error: {}", e)),
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Click in Editor text area
+                    self.focus = ActiveFocus::Editor;
+                    let text_left = self.text_area_left();
                     let buffer_line = self.scroll_row + (row - self.text_area_top());
-                    let buffer_col = self.scroll_col + col.saturating_sub(gutter_w);
+                    let buffer_col = self
+                        .scroll_col
+                        .saturating_add(col.saturating_sub(text_left + gutter_w));
 
                     let now = Instant::now();
                     if now.duration_since(self.last_click_time) < Duration::from_millis(400)
@@ -824,21 +1272,34 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.mouse_dragging && row >= self.text_area_top() && row < status_row {
-                    let buffer_line = self.scroll_row + (row - self.text_area_top());
-                    let buffer_col = self.scroll_col + col.saturating_sub(gutter_w);
-                    self.editor
-                        .set_cursor_from_line_col(buffer_line, buffer_col, true);
+                    let text_left = self.text_area_left();
+                    if col >= text_left {
+                        let buffer_line = self.scroll_row + (row - self.text_area_top());
+                        let buffer_col = self
+                            .scroll_col
+                            .saturating_add(col.saturating_sub(text_left + gutter_w));
+                        self.editor
+                            .set_cursor_from_line_col(buffer_line, buffer_col, true);
+                    }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.mouse_dragging = false;
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_row = self.scroll_row.saturating_sub(3);
+                if col < exp_w && self.explorer.is_visible {
+                    self.explorer.move_up();
+                } else {
+                    self.scroll_row = self.scroll_row.saturating_sub(3);
+                }
             }
             MouseEventKind::ScrollDown => {
-                let max_lines = self.editor.buffer().len_lines().saturating_sub(1);
-                self.scroll_row = (self.scroll_row + 3).min(max_lines);
+                if col < exp_w && self.explorer.is_visible {
+                    self.explorer.move_down(self.text_area_height());
+                } else {
+                    let max_lines = self.editor.buffer().len_lines().saturating_sub(1);
+                    self.scroll_row = (self.scroll_row + 3).min(max_lines);
+                }
             }
             _ => {}
         }
@@ -859,8 +1320,8 @@ impl App {
 
             let tab_len = tab_text.len();
             if col >= current_col && col < current_col + tab_len {
-                // Check if clicked the 'x' button inside tab
-                let close_button_offset = tab_text.find('x').unwrap_or(tab_len);
+                // Check if clicked the 'x' button inside tab (always located 4 characters before the end)
+                let close_button_offset = tab_len.saturating_sub(4);
                 if col >= current_col + close_button_offset - 1
                     && col <= current_col + close_button_offset + 1
                 {
@@ -926,9 +1387,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_tx = tx.clone();
     std::thread::spawn(move || loop {
         let app_event = match event::read() {
-            Ok(Event::Key(key)) => AppEvent::Input(key),
+            Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => AppEvent::Input(key),
             Ok(Event::Mouse(mouse)) => AppEvent::Mouse(mouse),
             Ok(Event::Resize(w, h)) => AppEvent::Resize(w, h),
+            Ok(Event::FocusLost) => AppEvent::FocusLost,
             _ => continue,
         };
         if input_tx.send(app_event).is_err() {
@@ -954,10 +1416,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.terminal_height = h;
                 app.render(&mut out)?;
             }
+            Ok(AppEvent::FocusLost) => {
+                if app.editor.is_dirty() && app.editor.file_path().is_some() {
+                    if let Err(e) = app.editor.save_async() {
+                        app.set_status(format!("Save error: {}", e));
+                    }
+                    let _ = app.poll_async_saves();
+                    app.render(&mut out)?;
+                }
+            }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // Autosave check on idle tick
-                if app.editor.check_autosave() {
-                    app.set_status("Autosaved");
+                let has_syntax_update = app.has_pending_syntax_response();
+                let autosaved = app.editor.check_autosave();
+                let has_save_event = app.poll_async_saves();
+                if autosaved || has_syntax_update || has_save_event {
                     app.render(&mut out)?;
                 }
             }
@@ -971,6 +1443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_app_creation_and_command_palette() {
@@ -995,7 +1468,7 @@ mod tests {
 
         let filtered = app.filtered_commands();
         assert!(!filtered.is_empty());
-        assert_eq!(filtered[0].id, "file.save");
+        assert!(filtered.iter().any(|c| c.id == "file.save"));
 
         // Esc closes palette
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
@@ -1020,6 +1493,79 @@ mod tests {
     }
 
     #[test]
+    fn test_app_file_explorer_toggle() {
+        let mut app = App::new(None).unwrap();
+        assert!(app.explorer.is_visible);
+
+        // F2 toggles explorer
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.explorer.is_visible);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.explorer.is_visible);
+    }
+
+    #[test]
+    fn test_app_prompt_save_and_open() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("test file content").unwrap();
+
+        // Ctrl+S triggers Save As prompt on untitled buffer
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.prompt.is_some());
+
+        // Type target filename
+        let target_path = "/tmp/lume_test_save.txt";
+        for c in target_path.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        // Enter submits save
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_none());
+        assert_eq!(app.editor.file_path(), Some(Path::new(target_path)));
+        assert!(!app.editor.is_dirty());
+
+        // Open File prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.prompt.is_some());
+
+        for c in target_path.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_none());
+
+        let _ = std::fs::remove_file(target_path);
+    }
+
+    #[test]
+    fn test_app_language_override() {
+        let mut app = App::new(None).unwrap();
+        assert_eq!(app.current_language(), None);
+
+        // Set language mode via command
+        app.execute_command("language.set_mode");
+        assert!(app.prompt.is_some());
+
+        for c in "Rust".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.current_language(), Some(Language::Rust));
+    }
+
+    #[test]
     fn test_app_mouse_tab_switching() {
         let mut app = App::new(None).unwrap();
         app.editor.insert_str("tab 1").unwrap();
@@ -1028,15 +1574,98 @@ mod tests {
 
         assert_eq!(app.editor.active_tab_idx(), 1);
 
-        // Click on Tab 1 in tab bar (row 0, col 5)
+        // Explorer is visible by default with width = app.text_area_left()
+        let offset = app.text_area_left();
+
+        // Click on Tab 1 title area in tab bar (row 0, col 5 inside tab bar)
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 5,
+            column: (offset + 5) as u16,
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
         .unwrap();
 
         assert_eq!(app.editor.active_tab_idx(), 0);
+    }
+
+    #[test]
+    fn test_app_mouse_tab_name_containing_x_does_not_close() {
+        let mut app = App::new(None).unwrap();
+        app.editor
+            .set_file_path(Some(PathBuf::from("/src/explorer.rs")));
+        app.editor.new_tab();
+        app.editor
+            .set_file_path(Some(PathBuf::from("/src/index.html")));
+
+        assert_eq!(app.editor.active_tab_idx(), 1);
+        let offset = app.text_area_left();
+
+        // Click on the 'x' character in the file name 'explorer.rs' in Tab 1
+        // Tab 1 text: "  1: explorer.rs x   "
+        // 'x' in 'explorer' is at offset ~6 in the tab text
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: (offset + 6) as u16,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+
+        // Tab was selected, not closed!
+        assert_eq!(app.editor.tabs().len(), 2);
+        assert_eq!(app.editor.active_tab_idx(), 0);
+    }
+
+    #[test]
+    fn test_app_syntax_worker_async_highlighting() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("fn main() { let x = 42; }").unwrap();
+        app.editor.set_language_override(Some("Rust".to_string()));
+
+        // First render triggers async syntax request
+        let mut sink = std::io::sink();
+        app.render(&mut sink).unwrap();
+
+        // Wait for background worker to produce tokens (up to 500ms)
+        for _ in 0..50 {
+            if app.has_pending_syntax_response() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let tokens = app.update_syntax_highlights();
+        assert!(
+            !tokens.is_empty(),
+            "SyntaxWorker should have generated tokens"
+        );
+
+        let has_keyword = tokens.iter().any(|t| t.token_type == TokenType::Keyword);
+        let has_function = tokens.iter().any(|t| t.token_type == TokenType::Function);
+        assert!(has_keyword, "Expected keyword token (e.g. fn / let)");
+        assert!(has_function, "Expected function token (e.g. main)");
+    }
+
+    #[test]
+    fn test_app_ignores_key_release_events() {
+        let mut app = App::new(None).unwrap();
+        let press =
+            KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Press);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+
+        app.handle_key(press).unwrap();
+        app.handle_key(release).unwrap();
+
+        assert_eq!(
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "a"
+        );
     }
 }
