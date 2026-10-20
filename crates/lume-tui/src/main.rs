@@ -175,6 +175,21 @@ const COMMANDS: &[CommandItem] = &[
         shortcut: "",
     },
     CommandItem {
+        id: "settings.toggle_auto_pairs",
+        title: "Settings: Toggle Auto-Closing Pairs",
+        shortcut: "",
+    },
+    CommandItem {
+        id: "settings.toggle_smart_indent",
+        title: "Settings: Toggle Smart Indentation",
+        shortcut: "",
+    },
+    CommandItem {
+        id: "settings.toggle_smart_unindent",
+        title: "Settings: Toggle Smart Unindent",
+        shortcut: "",
+    },
+    CommandItem {
         id: "app.quit",
         title: "App: Quit",
         shortcut: "Ctrl+Q",
@@ -1166,6 +1181,24 @@ impl App {
                     "Line numbers: {}",
                     if self.show_line_numbers { "ON" } else { "OFF" }
                 ));
+            }
+            "settings.toggle_auto_pairs" => {
+                let new_val = !self.editor.config().auto_pairs;
+                self.editor.config_mut().auto_pairs = new_val;
+                let status = if new_val { "Enabled" } else { "Disabled" };
+                self.set_status(format!("Auto-closing pairs: {}", status));
+            }
+            "settings.toggle_smart_indent" => {
+                let new_val = !self.editor.config().smart_indent;
+                self.editor.config_mut().smart_indent = new_val;
+                let status = if new_val { "Enabled" } else { "Disabled" };
+                self.set_status(format!("Smart indentation: {}", status));
+            }
+            "settings.toggle_smart_unindent" => {
+                let new_val = !self.editor.config().smart_unindent;
+                self.editor.config_mut().smart_unindent = new_val;
+                let status = if new_val { "Enabled" } else { "Disabled" };
+                self.set_status(format!("Smart unindent: {}", status));
             }
             "app.quit" => {
                 self.running = false;
@@ -2846,6 +2879,95 @@ mod tests {
         assert!(
             app.prompt.is_none(),
             "Ctrl+D should not open prompt in explorer"
+        );
+    }
+
+    #[test]
+    fn test_app_smart_indent_on_enter() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("    fn test() {").unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "    fn test() {\n        "
+        );
+        assert_eq!(app.editor.cursor_line_col(), (1, 8));
+    }
+
+    #[test]
+    fn test_app_smart_unindent_on_backspace() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("        ").unwrap();
+        assert_eq!(app.editor.cursor_line_col(), (0, 8));
+
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "    "
+        );
+        assert_eq!(app.editor.cursor_line_col(), (0, 4));
+    }
+
+    #[test]
+    fn test_app_auto_pairs_and_overtype() {
+        let mut app = App::new(None).unwrap();
+        // Type '(' -> inserts '()'
+        app.handle_key(KeyEvent::new(KeyCode::Char('('), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "()"
+        );
+        assert_eq!(app.editor.cursor_line_col(), (0, 1));
+
+        // Type ')' -> overtypes
+        app.handle_key(KeyEvent::new(KeyCode::Char(')'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "()"
+        );
+        assert_eq!(app.editor.cursor_line_col(), (0, 2));
+    }
+
+    #[test]
+    fn test_app_toggle_settings_commands() {
+        let mut app = App::new(None).unwrap();
+
+        // Toggle Auto-Pairs
+        assert!(app.editor.config().auto_pairs);
+        app.execute_command("settings.toggle_auto_pairs");
+        assert!(!app.editor.config().auto_pairs);
+        assert_eq!(
+            app.status_message.as_ref().map(|(s, _)| s.as_str()),
+            Some("Auto-closing pairs: Disabled")
+        );
+
+        app.execute_command("settings.toggle_auto_pairs");
+        assert!(app.editor.config().auto_pairs);
+        assert_eq!(
+            app.status_message.as_ref().map(|(s, _)| s.as_str()),
+            Some("Auto-closing pairs: Enabled")
+        );
+
+        // Toggle Smart Indent
+        assert!(app.editor.config().smart_indent);
+        app.execute_command("settings.toggle_smart_indent");
+        assert!(!app.editor.config().smart_indent);
+        assert_eq!(
+            app.status_message.as_ref().map(|(s, _)| s.as_str()),
+            Some("Smart indentation: Disabled")
+        );
+
+        // Toggle Smart Unindent
+        assert!(app.editor.config().smart_unindent);
+        app.execute_command("settings.toggle_smart_unindent");
+        assert!(!app.editor.config().smart_unindent);
+        assert_eq!(
+            app.status_message.as_ref().map(|(s, _)| s.as_str()),
+            Some("Smart unindent: Disabled")
         );
     }
 }
