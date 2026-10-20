@@ -10,7 +10,7 @@ lume-core = { path = "../lume-core" }
 tree-sitter = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-rust = "0.24"
-tree-sitter-python = "0.23"
+tree-sitter-python = "0.25"
 crossbeam-channel.workspace = true
 tree-sitter-java = "0.23"
 tree-sitter-cpp = "0.23"
