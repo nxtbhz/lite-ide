@@ -2236,4 +2236,67 @@ mod tests {
         );
         assert_eq!(ed.cursor_line_col(), (0, 0));
     }
+
+    #[test]
+    fn test_multi_cursor_smart_indent_mixed() {
+        let mut ed = Editor::new();
+        ed.insert_str("    fn foo() {\n        let x = 1;").unwrap();
+        // Cursor 1 at end of line 0 (after '{') -> offset 14
+        // Cursor 2 at end of line 1 (after ';') -> offset 33
+        ed.cursors_mut()
+            .set_cursors(vec![Cursor::new(14), Cursor::new(33)]);
+
+        ed.insert_newline().unwrap();
+
+        let expected = "    fn foo() {\n        \n        let x = 1;\n        ";
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            expected
+        );
+        assert_eq!(ed.cursors().cursors().len(), 2);
+        // Cursor 1 at line 1 col 8
+        assert_eq!(ed.cursors().cursors()[0].head, 23);
+        // Cursor 2 at line 3 col 8
+        assert_eq!(ed.cursors().cursors()[1].head, 51);
+    }
+
+    #[test]
+    fn test_multi_cursor_smart_unindent() {
+        let mut ed = Editor::new();
+        ed.insert_str("        \n        ").unwrap();
+        // Cursor 1 at end of line 0 (col 8) -> offset 8
+        // Cursor 2 at end of line 1 (col 8) -> offset 17
+        ed.cursors_mut()
+            .set_cursors(vec![Cursor::new(8), Cursor::new(17)]);
+
+        ed.delete_backwards().unwrap();
+
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    \n    "
+        );
+        assert_eq!(ed.cursors().cursors().len(), 2);
+        assert_eq!(ed.cursors().cursors()[0].head, 4);
+        assert_eq!(ed.cursors().cursors()[1].head, 9);
+    }
+
+    #[test]
+    fn test_multi_cursor_auto_pairs() {
+        let mut ed = Editor::new();
+        ed.insert_str("a \nb ").unwrap();
+        // Cursor 1 after 'a ' -> offset 2
+        // Cursor 2 after 'b ' -> offset 5
+        ed.cursors_mut()
+            .set_cursors(vec![Cursor::new(2), Cursor::new(5)]);
+
+        ed.insert_char('(').unwrap();
+
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "a ()\nb ()"
+        );
+        assert_eq!(ed.cursors().cursors().len(), 2);
+        assert_eq!(ed.cursors().cursors()[0].head, 3);
+        assert_eq!(ed.cursors().cursors()[1].head, 8);
+    }
 }
