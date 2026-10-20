@@ -103,6 +103,21 @@ const COMMANDS: &[CommandItem] = &[
         shortcut: "Ctrl+B / F2",
     },
     CommandItem {
+        id: "explorer.new_folder",
+        title: "Explorer: New Folder...",
+        shortcut: "n in Explorer",
+    },
+    CommandItem {
+        id: "explorer.delete_folder",
+        title: "Explorer: Delete Selected Folder...",
+        shortcut: "d in Explorer",
+    },
+    CommandItem {
+        id: "explorer.refresh",
+        title: "Explorer: Refresh Tree",
+        shortcut: "r in Explorer",
+    },
+    CommandItem {
         id: "language.set_mode",
         title: "Language: Change Language Mode",
         shortcut: "Ctrl+K M",
@@ -860,7 +875,7 @@ impl App {
             " LUME SHORTCUTS CHEAT SHEET (Press any key or Esc to close) ",
             " [File]      Ctrl+O: Open   │ Ctrl+S: Save      │ Ctrl+Shift+S: Save As ",
             " [Tabs]      Ctrl+T: New    │ Ctrl+W: Close     │ Ctrl+Tab / Alt+Left/Right: Switch ",
-            " [Explorer]  Ctrl+B / F2: Toggle Explorer       │ Up/Down/Enter/Left/Right: Nav ",
+            " [Explorer]  Ctrl+B/F2: Toggle │ n: New Folder │ d: Del Folder │ r: Refresh ",
             " [Edit]      Ctrl+Z: Undo   │ Ctrl+Y: Redo      │ Backspace / Del ",
             " [Cursor]    Arrows: Move   │ Shift+Arrows: Select │ Home / End ",
             " [Mouse]     Click: Position/Open │ 2xClick: Word │ 3xClick: Line │ Drag: Sel ",
@@ -924,6 +939,28 @@ impl App {
                         "CLOSED"
                     }
                 ));
+            }
+            "explorer.new_folder" => {
+                let target = self.explorer.target_folder_for_creation();
+                let display = target
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string();
+                self.prompt = Some(InputPrompt::create_folder(target, &display));
+            }
+            "explorer.delete_folder" => {
+                if let Some(item) = self.explorer.selected_item() {
+                    if item.is_dir {
+                        self.prompt = Some(InputPrompt::confirm_delete_folder(item.path.clone()));
+                    } else {
+                        self.set_status("Selected item is not a folder (use delete on folders)");
+                    }
+                }
+            }
+            "explorer.refresh" => {
+                self.explorer.refresh();
+                self.set_status("File Explorer refreshed");
             }
             "language.set_mode" => {
                 let langs: Vec<&'static str> = Language::all().iter().map(|l| l.name()).collect();
@@ -1299,6 +1336,15 @@ impl App {
                 }
                 KeyCode::Tab | KeyCode::Esc => {
                     self.focus = ActiveFocus::Editor;
+                }
+                KeyCode::Char('n') | KeyCode::Char('a') => {
+                    self.execute_command("explorer.new_folder");
+                }
+                KeyCode::Char('d') | KeyCode::Delete => {
+                    self.execute_command("explorer.delete_folder");
+                }
+                KeyCode::Char('r') => {
+                    self.execute_command("explorer.refresh");
                 }
                 _ => {}
             }
@@ -2015,6 +2061,78 @@ mod tests {
         let app = App::from_paths(&[&pattern]).unwrap();
         assert_eq!(app.editor.tabs().len(), 2);
         assert_eq!(app.editor.active_tab_idx(), 0);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_app_explorer_create_nested_folder_via_prompt() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_app_mkdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut app = App::from_paths(&[&tmp_dir]).unwrap();
+        app.focus = ActiveFocus::Explorer;
+
+        // Press 'n' in Explorer to open new folder prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_some());
+
+        // Type nested folder name 'deep/nested/pkg'
+        for c in "deep/nested/pkg".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        // Press Enter to submit
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_none());
+
+        let created_path = app.explorer.root.join("deep/nested/pkg");
+        assert!(created_path.exists());
+        assert!(created_path.is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_app_explorer_delete_folder_and_unlinks_open_tab() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_app_rmdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let folder = tmp_dir.join("submodule");
+        std::fs::create_dir_all(&folder).unwrap();
+        let sub_file = folder.join("file.rs");
+        std::fs::write(&sub_file, "fn test() {}").unwrap();
+
+        let mut app = App::from_paths(&[&tmp_dir, &sub_file]).unwrap();
+        assert_eq!(app.editor.tabs().len(), 1);
+        assert_eq!(app.editor.file_path(), Some(sub_file.canonicalize().unwrap().as_path()));
+
+        app.focus = ActiveFocus::Explorer;
+        // Select 'submodule' directory in explorer
+        if let Some(pos) = app.explorer.items.iter().position(|it| it.name == "submodule") {
+            app.explorer.selected_idx = pos;
+        }
+
+        // Press 'd' to open delete prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_some());
+
+        // Confirm delete with Enter
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.prompt.is_none());
+
+        // Folder is deleted on disk
+        assert!(!folder.exists());
+
+        // Open tab for file inside deleted directory must have its file_path unlinked
+        assert!(app.editor.file_path().is_none());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
