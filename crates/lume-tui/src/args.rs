@@ -230,7 +230,13 @@ mod tests {
     fn test_parse_cli_args() {
         // No args
         let cmd = parse_cli_args(["lume"]);
-        assert_eq!(cmd, CliCommand::Run(CliTargets { workspace: None, files: vec![] }));
+        assert_eq!(
+            cmd,
+            CliCommand::Run(CliTargets {
+                workspace: None,
+                files: vec![]
+            })
+        );
 
         // Help
         assert_eq!(parse_cli_args(["lume", "--help"]), CliCommand::Help);
@@ -243,7 +249,10 @@ mod tests {
         // Bench startup
         assert_eq!(
             parse_cli_args(["lume", "--bench-startup"]),
-            CliCommand::BenchStartup(CliTargets { workspace: None, files: vec![] })
+            CliCommand::BenchStartup(CliTargets {
+                workspace: None,
+                files: vec![]
+            })
         );
 
         // Directory path `.`

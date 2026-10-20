@@ -208,7 +208,11 @@ impl App {
 
     pub fn from_paths<P: AsRef<std::path::Path>>(paths: &[P]) -> Result<Self, std::io::Error> {
         let str_args: Vec<String> = std::iter::once("lume".to_string())
-            .chain(paths.iter().map(|p| p.as_ref().to_string_lossy().to_string()))
+            .chain(
+                paths
+                    .iter()
+                    .map(|p| p.as_ref().to_string_lossy().to_string()),
+            )
             .collect();
         match parse_cli_args(&str_args) {
             CliCommand::Run(targets) | CliCommand::BenchStartup(targets) => {
@@ -1931,7 +1935,9 @@ mod tests {
 
         // Tab 1
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "file1 content"
         );
 
@@ -1949,7 +1955,9 @@ mod tests {
         assert_eq!(app.explorer.root, std::fs::canonicalize(&tmp_dir).unwrap());
         assert_eq!(app.editor.tabs().len(), 1);
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "hello world"
         );
 
