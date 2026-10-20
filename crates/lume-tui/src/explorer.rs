@@ -292,6 +292,46 @@ impl FileExplorer {
         Ok(canon_target)
     }
 
+    pub fn delete_folder<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<PathBuf> {
+        let target = path.as_ref();
+        let root_canon = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let target_canon = target.canonicalize()?;
+
+        if target_canon == root_canon {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Cannot delete the workspace root directory",
+            ));
+        }
+
+        if !target_canon.starts_with(&root_canon) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Cannot delete path outside workspace root",
+            ));
+        }
+
+        if !target_canon.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Target is not a directory",
+            ));
+        }
+
+        fs::remove_dir_all(&target_canon)?;
+
+        // Prune deleted directory and all descendants from expanded_dirs
+        self.expanded_dirs.retain(|p| !p.starts_with(&target_canon));
+
+        self.refresh();
+
+        if !self.items.is_empty() && self.selected_idx >= self.items.len() {
+            self.selected_idx = self.items.len() - 1;
+        }
+
+        Ok(target_canon)
+    }
+
     pub fn render<W: Write>(
         &self,
         writer: &mut W,
@@ -641,6 +681,61 @@ mod tests {
 
         let res = explorer.create_folder(&root_canon, "../outside_secret");
         assert!(res.is_err(), "Must reject path traversal escaping root");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_delete_folder_recursive_and_prunes_expanded() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_rmdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        // Create folder with contents: parent/child/grandchild
+        let grandchild = explorer
+            .create_folder(&root_canon, "parent/child/grandchild")
+            .unwrap();
+        let file_path = grandchild.join("nested.txt");
+        std::fs::write(&file_path, "hello nested").unwrap();
+        explorer.refresh();
+
+        let parent_path = root_canon.join("parent");
+        let child_path = parent_path.join("child");
+        assert!(explorer.expanded_dirs.contains(&parent_path));
+        assert!(explorer.expanded_dirs.contains(&child_path));
+
+        // Delete parent folder
+        let deleted = explorer.delete_folder(&parent_path).unwrap();
+        assert_eq!(deleted, parent_path);
+        assert!(!parent_path.exists());
+
+        // Expanded dirs must have pruned parent, child, grandchild
+        assert!(!explorer.expanded_dirs.contains(&parent_path));
+        assert!(!explorer.expanded_dirs.contains(&child_path));
+        assert!(!explorer.expanded_dirs.contains(&grandchild));
+
+        // Items should be empty or clamped
+        assert!(!explorer.items.iter().any(|it| it.path.starts_with(&parent_path)));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_delete_root_folder_prevented() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_root_del_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        let res = explorer.delete_folder(&root_canon);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(tmp_dir.exists());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
