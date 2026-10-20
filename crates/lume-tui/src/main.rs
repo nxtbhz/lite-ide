@@ -968,6 +968,20 @@ impl App {
         self.adjust_viewport();
     }
 
+    pub fn handle_deleted_folder_tabs(&mut self, folder_path: &std::path::Path) {
+        let folder_canon = folder_path.canonicalize().unwrap_or_else(|_| folder_path.to_path_buf());
+        for tab in self.editor.tabs_mut() {
+            if let Some(ref p) = tab.file_path {
+                let p_canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+                if p_canon.starts_with(&folder_canon) {
+                    let _ = lume_core::Journal::remove(p);
+                    tab.file_path = None;
+                    tab.is_dirty = true;
+                }
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> std::io::Result<()> {
         if key.kind == KeyEventKind::Release {
             return Ok(());
@@ -1060,6 +1074,30 @@ impl App {
                                 self.set_status("Language mode: Plain Text");
                             } else {
                                 self.set_status(format!("Unknown language: {}", chosen));
+                            }
+                        }
+                        PromptAction::CreateFolder { parent_dir } => {
+                            if !val.is_empty() {
+                                match self.explorer.create_folder(&parent_dir, &val) {
+                                    Ok(created) => {
+                                        self.set_status(format!("Created folder: {}", created.display()));
+                                    }
+                                    Err(e) => self.set_status(format!("Create folder error: {}", e)),
+                                }
+                            }
+                        }
+                        PromptAction::ConfirmDeleteFolder { path } => {
+                            let should_delete = val.is_empty() || val.eq_ignore_ascii_case("y") || val.eq_ignore_ascii_case("yes");
+                            if should_delete {
+                                match self.explorer.delete_folder(&path) {
+                                    Ok(deleted) => {
+                                        self.handle_deleted_folder_tabs(&deleted);
+                                        self.set_status(format!("Deleted folder: {}", deleted.display()));
+                                    }
+                                    Err(e) => self.set_status(format!("Delete error: {}", e)),
+                                }
+                            } else {
+                                self.set_status("Deletion cancelled");
                             }
                         }
                     }

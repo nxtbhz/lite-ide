@@ -5,13 +5,15 @@ use crossterm::{
 };
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptAction {
     OpenFile,
     SaveFileAs,
     SetLanguage,
+    CreateFolder { parent_dir: PathBuf },
+    ConfirmDeleteFolder { path: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +67,33 @@ impl InputPrompt {
         }
     }
 
+    pub fn create_folder(parent_dir: PathBuf, display_name: &str) -> Self {
+        let formatted = format!(" Create Folder in '{}' (Enter: create, Esc: cancel) ", display_name);
+        let title: &'static str = Box::leak(formatted.into_boxed_str());
+        Self {
+            action: PromptAction::CreateFolder { parent_dir },
+            title,
+            value: String::new(),
+            cursor_pos: 0,
+            suggestions: Vec::new(),
+            selected_suggestion: 0,
+        }
+    }
+
+    pub fn confirm_delete_folder(path: PathBuf) -> Self {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
+        let formatted = format!(" Delete folder '{}' and all contents? (y/Enter: confirm, Esc: cancel) ", name);
+        let title: &'static str = Box::leak(formatted.into_boxed_str());
+        Self {
+            action: PromptAction::ConfirmDeleteFolder { path },
+            title,
+            value: String::new(),
+            cursor_pos: 0,
+            suggestions: Vec::new(),
+            selected_suggestion: 0,
+        }
+    }
+
     pub fn update_suggestions(&mut self) {
         match self.action {
             PromptAction::OpenFile | PromptAction::SaveFileAs => {
@@ -112,8 +141,8 @@ impl InputPrompt {
                     self.selected_suggestion = 0;
                 }
             }
-            PromptAction::SetLanguage => {
-                // Handled in handle_key with filter
+            PromptAction::SetLanguage | PromptAction::CreateFolder { .. } | PromptAction::ConfirmDeleteFolder { .. } => {
+                // Handled in handle_key with filter or no suggestions needed
             }
         }
     }
@@ -176,6 +205,7 @@ impl InputPrompt {
                 self.value = suggestion.clone();
                 self.cursor_pos = self.value.len();
             }
+            PromptAction::CreateFolder { .. } | PromptAction::ConfirmDeleteFolder { .. } => {}
         }
     }
 
@@ -306,5 +336,24 @@ mod tests {
         prompt.move_right(); // after '🚀'
         prompt.handle_backspace(); // removes '🚀'
         assert_eq!(prompt.value, "ação_é_.rs");
+    }
+
+    #[test]
+    fn test_prompt_create_folder_action() {
+        use std::path::PathBuf;
+        let parent = PathBuf::from("/workspace/crates");
+        let prompt = InputPrompt::create_folder(parent.clone(), "crates");
+        assert_eq!(prompt.action, PromptAction::CreateFolder { parent_dir: parent });
+        assert!(prompt.title.contains("crates"));
+        assert_eq!(prompt.value, "");
+    }
+
+    #[test]
+    fn test_prompt_confirm_delete_folder_action() {
+        use std::path::PathBuf;
+        let target = PathBuf::from("/workspace/crates/old_module");
+        let prompt = InputPrompt::confirm_delete_folder(target.clone());
+        assert_eq!(prompt.action, PromptAction::ConfirmDeleteFolder { path: target });
+        assert!(prompt.title.contains("old_module"));
     }
 }
