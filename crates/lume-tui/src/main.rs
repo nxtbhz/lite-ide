@@ -23,6 +23,7 @@ use explorer::FileExplorer;
 use lume_core::{Editor, TextBuffer};
 use lume_syntax::{HighlightToken, Language, SyntaxRequest, SyntaxWorker, TokenType};
 use prompt::{InputPrompt, PromptAction};
+use search::{SearchField, SearchMode, SearchState};
 use std::collections::HashMap;
 use std::env;
 use std::io::{stdout, BufWriter, Write};
@@ -154,6 +155,16 @@ const COMMANDS: &[CommandItem] = &[
         shortcut: "Ctrl+Y",
     },
     CommandItem {
+        id: "edit.find",
+        title: "Edit: Find in Buffer...",
+        shortcut: "Ctrl+F",
+    },
+    CommandItem {
+        id: "edit.replace",
+        title: "Edit: Replace in Buffer...",
+        shortcut: "Ctrl+H",
+    },
+    CommandItem {
         id: "view.which_key",
         title: "View: Which-Key Shortcuts",
         shortcut: "F1",
@@ -194,6 +205,8 @@ pub struct App {
     pub palette_selected: usize,
     pub which_key_open: bool,
     pub prompt: Option<InputPrompt>,
+    pub search_state: Option<SearchState>,
+    last_search_query: Option<String>,
 
     // Syntax worker & cache
     pub syntax_worker: SyntaxWorker,
@@ -331,6 +344,8 @@ impl App {
             palette_selected: 0,
             which_key_open: false,
             prompt: None,
+            search_state: None,
+            last_search_query: None,
 
             syntax_worker: SyntaxWorker::spawn(),
             syntax_cache: HashMap::new(),
@@ -356,6 +371,36 @@ impl App {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn update_search_query(&mut self, state: &mut SearchState) {
+        self.last_search_query = if !state.query.is_empty() {
+            Some(state.query.clone())
+        } else {
+            None
+        };
+        if state.query.is_empty() {
+            state.match_count = 0;
+            state.active_match_idx = 0;
+            self.editor
+                .cursors_mut()
+                .set_cursors(vec![state.initial_cursor]);
+            self.scroll_row = state.initial_scroll.0;
+            self.scroll_col = state.initial_scroll.1;
+        } else {
+            state.match_count =
+                lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
+            state.active_match_idx = 0;
+            let from = state.initial_cursor.min();
+            if let Some((s, e)) =
+                lume_core::search::find_next(self.editor.buffer(), &state.query, from, false)
+            {
+                let primary = self.editor.cursors_mut().primary_mut();
+                primary.anchor = s;
+                primary.head = e;
+                self.adjust_viewport();
+            }
+        }
     }
 
     pub fn explorer_width(&self) -> usize {
@@ -590,6 +635,24 @@ impl App {
                     let end_tok = rest_tokens.partition_point(|t| t.start_byte < line_end_byte);
                     let line_tokens = &rest_tokens[..end_tok];
 
+                    let line_matches: Vec<(usize, usize)> =
+                        if let Some(ref search) = self.search_state {
+                            if !search.query.is_empty() {
+                                lume_core::search::find_matches_in_str(
+                                    &line_str,
+                                    &search.query,
+                                    false,
+                                )
+                                .into_iter()
+                                .map(|(s, e)| (line_start_byte + s, line_start_byte + e))
+                                .collect()
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
                     let chars: Vec<char> = line_str.chars().collect();
                     let mut current_byte = line_start_byte;
 
@@ -606,12 +669,39 @@ impl App {
                         let is_selected = selection_range
                             .as_ref()
                             .is_some_and(|r| r.contains(&char_byte));
+                        let search_match = line_matches
+                            .iter()
+                            .find(|(s, e)| *s <= char_byte && char_byte < *e);
+
                         if is_selected {
                             queue!(
                                 writer,
                                 SetBackgroundColor(Color::DarkBlue),
                                 SetForegroundColor(Color::White)
                             )?;
+                        } else if let Some(&(ms, me)) = search_match {
+                            let is_active = primary_cursor.range() == (ms..me);
+                            if is_active {
+                                queue!(
+                                    writer,
+                                    SetBackgroundColor(Color::Rgb {
+                                        r: 215,
+                                        g: 155,
+                                        b: 0
+                                    }),
+                                    SetForegroundColor(Color::Black)
+                                )?;
+                            } else {
+                                queue!(
+                                    writer,
+                                    SetBackgroundColor(Color::Rgb {
+                                        r: 120,
+                                        g: 90,
+                                        b: 20
+                                    }),
+                                    SetForegroundColor(Color::White)
+                                )?;
+                            }
                         } else {
                             // Syntax color via binary search on current line's tokens
                             let token_type = line_tokens
@@ -655,68 +745,72 @@ impl App {
             queue!(writer, Clear(ClearType::UntilNewLine))?;
         }
 
-        // 5. Render Status Bar (Last Row)
-        let status_row = self.terminal_height.saturating_sub(1);
-        queue!(
-            writer,
-            MoveTo(0, status_row),
-            SetBackgroundColor(Color::DarkBlue),
-            SetForegroundColor(Color::White)
-        )?;
-
+        // 5. Render Status Bar or Footer Search Bar (Last Row)
         let (cursor_row, cursor_col) = self.editor.cursor_line_col();
-        let file_name = self.editor.active_tab().name();
-        let dirty_flag = if self.editor.is_dirty() { " [*]" } else { "" };
-        let lang_str = self
-            .current_language()
-            .map(|l| l.name())
-            .unwrap_or("Plain Text");
-
-        let exp_indicator = if self.explorer.is_visible {
-            "[Explorer ON] "
+        let status_row = self.terminal_height.saturating_sub(1);
+        if let Some(ref search) = self.search_state {
+            search.render(writer, self.terminal_width, status_row)?;
         } else {
-            "[Explorer OFF] "
-        };
+            queue!(
+                writer,
+                MoveTo(0, status_row),
+                SetBackgroundColor(Color::DarkBlue),
+                SetForegroundColor(Color::White)
+            )?;
 
-        let left_status = format!(
-            " LUME │ {}{} │ Tab {}/{} │ {}{} │ Ln {}, Col {} │ {}",
-            exp_indicator,
-            if self.focus == ActiveFocus::Explorer {
-                "(Explorer Active)"
+            let file_name = self.editor.active_tab().name();
+            let dirty_flag = if self.editor.is_dirty() { " [*]" } else { "" };
+            let lang_str = self
+                .current_language()
+                .map(|l| l.name())
+                .unwrap_or("Plain Text");
+
+            let exp_indicator = if self.explorer.is_visible {
+                "[Explorer ON] "
             } else {
-                "(Editor)"
-            },
-            active_tab_idx + 1,
-            self.editor.tabs().len(),
-            file_name,
-            dirty_flag,
-            cursor_row + 1,
-            cursor_col + 1,
-            lang_str
-        );
+                "[Explorer OFF] "
+            };
 
-        let right_status = if let Some((ref msg, time)) = self.status_message {
-            if time.elapsed() < Duration::from_secs(4) {
-                format!("{} ", msg)
+            let left_status = format!(
+                " LUME │ {}{} │ Tab {}/{} │ {}{} │ Ln {}, Col {} │ {}",
+                exp_indicator,
+                if self.focus == ActiveFocus::Explorer {
+                    "(Explorer Active)"
+                } else {
+                    "(Editor)"
+                },
+                active_tab_idx + 1,
+                self.editor.tabs().len(),
+                file_name,
+                dirty_flag,
+                cursor_row + 1,
+                cursor_col + 1,
+                lang_str
+            );
+
+            let right_status = if let Some((ref msg, time)) = self.status_message {
+                if time.elapsed() < Duration::from_secs(4) {
+                    format!("{} ", msg)
+                } else {
+                    "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help "
+                        .to_string()
+                }
             } else {
-                "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help "
-                    .to_string()
-            }
-        } else {
-            "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help ".to_string()
-        };
+                "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help ".to_string()
+            };
 
-        let width = self.terminal_width as usize;
-        let spaces = width.saturating_sub(left_status.len() + right_status.len());
-        let bar = format!(
-            "{}{:width$}{}",
-            left_status,
-            "",
-            right_status,
-            width = spaces
-        );
-        let bar_trimmed: String = bar.chars().take(width).collect();
-        queue!(writer, Print(bar_trimmed), ResetColor)?;
+            let width = self.terminal_width as usize;
+            let spaces = width.saturating_sub(left_status.len() + right_status.len());
+            let bar = format!(
+                "{}{:width$}{}",
+                left_status,
+                "",
+                right_status,
+                width = spaces
+            );
+            let bar_trimmed: String = bar.chars().take(width).collect();
+            queue!(writer, Print(bar_trimmed), ResetColor)?;
+        }
 
         // 6. Overlays
         if let Some(ref prompt) = self.prompt {
@@ -728,7 +822,7 @@ impl App {
         }
 
         // 7. Position terminal cursor
-        if self.prompt.is_none() && !self.palette_open && !self.which_key_open {
+        if self.search_state.is_none() && self.prompt.is_none() && !self.palette_open && !self.which_key_open {
             if self.focus == ActiveFocus::Editor {
                 let in_view = cursor_row >= self.scroll_row
                     && cursor_row < self.scroll_row + text_h
@@ -988,6 +1082,50 @@ impl App {
                     self.set_status("Redo");
                 }
             }
+            "edit.find" => {
+                let cur = *self.editor.cursors().primary();
+                let scroll = (self.scroll_row, self.scroll_col);
+                let initial_query = if cur.is_selection() {
+                    let sel = self.editor.buffer().slice_to_cow(cur.min(), cur.max());
+                    if !sel.contains('\n') && !sel.is_empty() {
+                        Some(sel.to_string())
+                    } else {
+                        self.last_search_query.clone()
+                    }
+                } else {
+                    self.last_search_query.clone()
+                };
+                let mut state = SearchState::new_find(cur, scroll, initial_query.as_deref());
+                if !state.query.is_empty() {
+                    state.match_count =
+                        lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
+                    let _ = self.editor.find_next(&state.query, false);
+                    self.adjust_viewport();
+                }
+                self.search_state = Some(state);
+            }
+            "edit.replace" => {
+                let cur = *self.editor.cursors().primary();
+                let scroll = (self.scroll_row, self.scroll_col);
+                let initial_query = if cur.is_selection() {
+                    let sel = self.editor.buffer().slice_to_cow(cur.min(), cur.max());
+                    if !sel.contains('\n') && !sel.is_empty() {
+                        Some(sel.to_string())
+                    } else {
+                        self.last_search_query.clone()
+                    }
+                } else {
+                    self.last_search_query.clone()
+                };
+                let mut state = SearchState::new_replace(cur, scroll, initial_query.as_deref());
+                if !state.query.is_empty() {
+                    state.match_count =
+                        lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
+                    let _ = self.editor.find_next(&state.query, false);
+                    self.adjust_viewport();
+                }
+                self.search_state = Some(state);
+            }
             "view.which_key" => {
                 self.which_key_open = true;
             }
@@ -1204,7 +1342,150 @@ impl App {
             return Ok(());
         }
 
-        // 3. If Command Palette is open, route keys to palette
+        // 3. If Search Bar is open (Find or Replace)
+        if let Some(mut state) = self.search_state.take() {
+            let is_ctrl_alt_enter = key.code == KeyCode::Enter
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::ALT);
+
+            if is_ctrl_alt_enter {
+                if state.mode == SearchMode::Replace && !state.query.is_empty() {
+                    let count = self
+                        .editor
+                        .replace_all(&state.query, &state.replacement, false);
+                    state.match_count = lume_core::search::count_matches(
+                        self.editor.buffer(),
+                        &state.query,
+                        false,
+                    );
+                    state.active_match_idx = 0;
+                    self.set_status(format!("Substituídas {} ocorrências", count));
+                    self.adjust_viewport();
+                }
+                self.search_state = Some(state);
+                return Ok(());
+            }
+
+            match key.code {
+                KeyCode::Esc => {
+                    self.editor
+                        .cursors_mut()
+                        .set_cursors(vec![state.initial_cursor]);
+                    self.scroll_row = state.initial_scroll.0;
+                    self.scroll_col = state.initial_scroll.1;
+                    if !state.query.is_empty() {
+                        self.last_search_query = Some(state.query.clone());
+                    }
+                    self.search_state = None;
+                    return Ok(());
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    if state.mode == SearchMode::Replace {
+                        state.toggle_field();
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Enter | KeyCode::F(3) => {
+                    if shift {
+                        if !state.query.is_empty() {
+                            if let Some((_s, _e)) = self.editor.find_prev(&state.query, false) {
+                                if state.match_count > 0 {
+                                    state.active_match_idx = (state.active_match_idx
+                                        + state.match_count
+                                        - 1)
+                                        % state.match_count;
+                                }
+                                self.adjust_viewport();
+                            }
+                        }
+                    } else if state.mode == SearchMode::Replace
+                        && state.active_field == SearchField::Replacement
+                    {
+                        let replaced = self
+                            .editor
+                            .replace_current(&state.query, &state.replacement, false);
+                        state.match_count = lume_core::search::count_matches(
+                            self.editor.buffer(),
+                            &state.query,
+                            false,
+                        );
+                        if replaced {
+                            self.set_status("Ocorrência substituída");
+                        }
+                        self.adjust_viewport();
+                    } else if !state.query.is_empty() {
+                        if let Some((_s, _e)) = self.editor.find_next(&state.query, false) {
+                            if state.match_count > 0 {
+                                state.active_match_idx =
+                                    (state.active_match_idx + 1) % state.match_count;
+                            }
+                            self.adjust_viewport();
+                        }
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Left => {
+                    state.move_left();
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Right => {
+                    state.move_right();
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Home => {
+                    state.move_home();
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::End => {
+                    state.move_end();
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    state.handle_backspace();
+                    if state.active_field == SearchField::Query {
+                        self.update_search_query(&mut state);
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Char('f') if ctrl && !alt => {
+                    state.mode = SearchMode::Find;
+                    state.active_field = SearchField::Query;
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Char('h') if ctrl && !alt => {
+                    state.mode = SearchMode::Replace;
+                    if state.query.is_empty() {
+                        state.active_field = SearchField::Query;
+                    } else {
+                        state.active_field = SearchField::Replacement;
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    state.handle_char(c);
+                    if state.active_field == SearchField::Query {
+                        self.update_search_query(&mut state);
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                _ => {
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+            }
+        }
+
+        // 4. If Command Palette is open, route keys to palette
         if self.palette_open {
             match key.code {
                 KeyCode::Esc => {
@@ -1297,6 +1578,14 @@ impl App {
                     self.execute_command("edit.redo");
                     return Ok(());
                 }
+                KeyCode::Char('f') => {
+                    self.execute_command("edit.find");
+                    return Ok(());
+                }
+                KeyCode::Char('h') => {
+                    self.execute_command("edit.replace");
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -1308,6 +1597,17 @@ impl App {
             }
             KeyCode::F(2) => {
                 self.execute_command("view.toggle_explorer");
+                return Ok(());
+            }
+            KeyCode::F(3) => {
+                if let Some(ref q) = self.last_search_query.clone() {
+                    if shift {
+                        let _ = self.editor.find_prev(q, false);
+                    } else {
+                        let _ = self.editor.find_next(q, false);
+                    }
+                    self.adjust_viewport();
+                }
                 return Ok(());
             }
             KeyCode::Right if alt => {
@@ -1464,6 +1764,7 @@ impl App {
                     }
 
                     // Click in Editor text area
+                    self.search_state = None;
                     self.focus = ActiveFocus::Editor;
                     let text_left = self.text_area_left();
                     let buffer_line = self.scroll_row + (row - self.text_area_top());
@@ -1685,6 +1986,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn test_app_find_incremental_and_navigation() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("alpha beta alpha gamma alpha").unwrap();
+        app.editor.cursors_mut().set_single(0);
+
+        // 1. Trigger Ctrl+F
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)).unwrap();
+        assert!(app.search_state.is_some());
+
+        // 2. Type "alpha"
+        for c in "alpha".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+        }
+        assert_eq!(app.editor.cursors().primary().range(), 0..5);
+
+        // 3. Advance to next match via Enter
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.editor.cursors().primary().range(), 11..16);
+
+        // 4. Advance via F3
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.editor.cursors().primary().range(), 23..28);
+
+        // 5. Previous via Shift+F3
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT)).unwrap();
+        assert_eq!(app.editor.cursors().primary().range(), 11..16);
+
+        // 6. Esc cancels and restores initial position (0)
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        assert!(app.search_state.is_none());
+        assert_eq!(app.editor.cursors().primary().head, 0);
+    }
+
+    #[test]
+    fn test_app_replace_current_and_replace_all_atomic() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("val other val extra val").unwrap();
+        app.editor.cursors_mut().set_single(0);
+
+        // Trigger Ctrl+H
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)).unwrap();
+        assert!(app.search_state.is_some());
+
+        // Type query "val"
+        for c in "val".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+        }
+        // Switch to Replacement field
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).unwrap();
+        for c in "result".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+        }
+
+        // Replace current occurrence via Enter
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert!(app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()).starts_with("result other"));
+
+        // Replace all remaining via Ctrl+Alt+Enter
+        let ctrl_alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        app.handle_key(ctrl_alt_enter).unwrap();
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "result other result extra result"
+        );
+
+        // First undo reverts the atomic replace_all
+        app.execute_command("edit.undo");
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "result other val extra val"
+        );
+
+        // Second undo reverts the earlier single replace_current
+        app.execute_command("edit.undo");
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "val other val extra val"
+        );
+    }
 
     #[test]
     fn test_app_creation_and_command_palette() {
