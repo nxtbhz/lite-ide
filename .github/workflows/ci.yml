@@ -6,9 +6,16 @@ on:
   pull_request:
     branches: [ "main", "master" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
-    name: Build & Test
+  fmt-and-clippy:
+    name: Code Quality (fmt, clippy, doc & benches)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,7 +24,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -26,7 +33,45 @@ jobs:
         run: cargo fmt --check
 
       - name: Run Clippy lints
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Validate documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
+
+      - name: Check benchmarks compilation
+        run: cargo check --workspace --benches --locked
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Security audit dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test Suite (${{ matrix.os }})
+    needs: [fmt-and-clippy]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
       - name: Run test suite
-        run: cargo test --all
+        run: cargo test --workspace --locked
