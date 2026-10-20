@@ -635,23 +635,20 @@ impl App {
                     let end_tok = rest_tokens.partition_point(|t| t.start_byte < line_end_byte);
                     let line_tokens = &rest_tokens[..end_tok];
 
-                    let line_matches: Vec<(usize, usize)> =
-                        if let Some(ref search) = self.search_state {
-                            if !search.query.is_empty() {
-                                lume_core::search::find_matches_in_str(
-                                    &line_str,
-                                    &search.query,
-                                    false,
-                                )
+                    let line_matches: Vec<(usize, usize)> = if let Some(ref search) =
+                        self.search_state
+                    {
+                        if !search.query.is_empty() {
+                            lume_core::search::find_matches_in_str(&line_str, &search.query, false)
                                 .into_iter()
                                 .map(|(s, e)| (line_start_byte + s, line_start_byte + e))
                                 .collect()
-                            } else {
-                                Vec::new()
-                            }
                         } else {
                             Vec::new()
-                        };
+                        }
+                    } else {
+                        Vec::new()
+                    };
 
                     let chars: Vec<char> = line_str.chars().collect();
                     let mut current_byte = line_start_byte;
@@ -796,7 +793,8 @@ impl App {
                         .to_string()
                 }
             } else {
-                "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help ".to_string()
+                "F2: Explorer │ Ctrl+O: Open │ Ctrl+S: Save │ Ctrl+P: Palette │ F1: Help "
+                    .to_string()
             };
 
             let width = self.terminal_width as usize;
@@ -822,7 +820,11 @@ impl App {
         }
 
         // 7. Position terminal cursor
-        if self.search_state.is_none() && self.prompt.is_none() && !self.palette_open && !self.which_key_open {
+        if self.search_state.is_none()
+            && self.prompt.is_none()
+            && !self.palette_open
+            && !self.which_key_open
+        {
             if self.focus == ActiveFocus::Editor {
                 let in_view = cursor_row >= self.scroll_row
                     && cursor_row < self.scroll_row + text_h
@@ -1353,11 +1355,8 @@ impl App {
                     let count = self
                         .editor
                         .replace_all(&state.query, &state.replacement, false);
-                    state.match_count = lume_core::search::count_matches(
-                        self.editor.buffer(),
-                        &state.query,
-                        false,
-                    );
+                    state.match_count =
+                        lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
                     state.active_match_idx = 0;
                     self.set_status(format!("Substituídas {} ocorrências", count));
                     self.adjust_viewport();
@@ -1391,10 +1390,9 @@ impl App {
                         if !state.query.is_empty() {
                             if let Some((_s, _e)) = self.editor.find_prev(&state.query, false) {
                                 if state.match_count > 0 {
-                                    state.active_match_idx = (state.active_match_idx
-                                        + state.match_count
-                                        - 1)
-                                        % state.match_count;
+                                    state.active_match_idx =
+                                        (state.active_match_idx + state.match_count - 1)
+                                            % state.match_count;
                                 }
                                 self.adjust_viewport();
                             }
@@ -1402,9 +1400,9 @@ impl App {
                     } else if state.mode == SearchMode::Replace
                         && state.active_field == SearchField::Replacement
                     {
-                        let replaced = self
-                            .editor
-                            .replace_current(&state.query, &state.replacement, false);
+                        let replaced =
+                            self.editor
+                                .replace_current(&state.query, &state.replacement, false);
                         state.match_count = lume_core::search::count_matches(
                             self.editor.buffer(),
                             &state.query,
@@ -1990,33 +1988,41 @@ mod tests {
     #[test]
     fn test_app_find_incremental_and_navigation() {
         let mut app = App::new(None).unwrap();
-        app.editor.insert_str("alpha beta alpha gamma alpha").unwrap();
+        app.editor
+            .insert_str("alpha beta alpha gamma alpha")
+            .unwrap();
         app.editor.cursors_mut().set_single(0);
 
         // 1. Trigger Ctrl+F
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .unwrap();
         assert!(app.search_state.is_some());
 
         // 2. Type "alpha"
         for c in "alpha".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
         }
         assert_eq!(app.editor.cursors().primary().range(), 0..5);
 
         // 3. Advance to next match via Enter
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
         assert_eq!(app.editor.cursors().primary().range(), 11..16);
 
         // 4. Advance via F3
-        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
         assert_eq!(app.editor.cursors().primary().range(), 23..28);
 
         // 5. Previous via Shift+F3
-        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT))
+            .unwrap();
         assert_eq!(app.editor.cursors().primary().range(), 11..16);
 
         // 6. Esc cancels and restores initial position (0)
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
         assert!(app.search_state.is_none());
         assert_eq!(app.editor.cursors().primary().head, 0);
     }
@@ -2028,42 +2034,58 @@ mod tests {
         app.editor.cursors_mut().set_single(0);
 
         // Trigger Ctrl+H
-        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+            .unwrap();
         assert!(app.search_state.is_some());
 
         // Type query "val"
         for c in "val".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
         }
         // Switch to Replacement field
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
         for c in "result".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
         }
 
         // Replace current occurrence via Enter
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
-        assert!(app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()).starts_with("result other"));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app
+            .editor
+            .buffer()
+            .slice_to_cow(0, app.editor.buffer().len_bytes())
+            .starts_with("result other"));
 
         // Replace all remaining via Ctrl+Alt+Enter
-        let ctrl_alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let ctrl_alt_enter =
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT);
         app.handle_key(ctrl_alt_enter).unwrap();
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "result other result extra result"
         );
 
         // First undo reverts the atomic replace_all
         app.execute_command("edit.undo");
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "result other val extra val"
         );
 
         // Second undo reverts the earlier single replace_current
         app.execute_command("edit.undo");
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "val other val extra val"
         );
     }

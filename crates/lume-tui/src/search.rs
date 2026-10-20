@@ -114,7 +114,10 @@ impl SearchState {
             }
             SearchField::Replacement => {
                 if self.replacement_cursor > 0 {
-                    if let Some(prev) = self.replacement[..self.replacement_cursor].chars().next_back() {
+                    if let Some(prev) = self.replacement[..self.replacement_cursor]
+                        .chars()
+                        .next_back()
+                    {
                         self.replacement_cursor -= prev.len_utf8();
                         self.replacement.remove(self.replacement_cursor);
                     }
@@ -134,7 +137,10 @@ impl SearchState {
             }
             SearchField::Replacement => {
                 if self.replacement_cursor > 0 {
-                    if let Some(prev) = self.replacement[..self.replacement_cursor].chars().next_back() {
+                    if let Some(prev) = self.replacement[..self.replacement_cursor]
+                        .chars()
+                        .next_back()
+                    {
                         self.replacement_cursor -= prev.len_utf8();
                     }
                 }
@@ -182,7 +188,11 @@ impl SearchState {
         row: u16,
     ) -> std::io::Result<()> {
         let width = terminal_width as usize;
-        let bg_color = Color::Rgb { r: 24, g: 28, b: 38 };
+        let bg_color = Color::Rgb {
+            r: 24,
+            g: 28,
+            b: 38,
+        };
 
         queue!(
             writer,
@@ -206,10 +216,12 @@ impl SearchState {
                 };
                 let hints = " (Enter/F3: Next, Shift+Enter/F3: Prev, Esc: Cancel) ";
 
-                cursor_col = prefix.chars().count() + self.query[..self.query_cursor].chars().count();
+                cursor_col =
+                    prefix.chars().count() + self.query[..self.query_cursor].chars().count();
 
                 let left_content = format!("{}{}{}", prefix, query_display, status_text);
-                let spaces = width.saturating_sub(left_content.chars().count() + hints.chars().count());
+                let spaces =
+                    width.saturating_sub(left_content.chars().count() + hints.chars().count());
                 let full_bar = format!("{}{:spaces$}{}", left_content, "", hints, spaces = spaces);
                 let trimmed: String = full_bar.chars().take(width).collect();
 
@@ -251,7 +263,8 @@ impl SearchState {
                     "{}{}{}{}{}",
                     find_prefix, self.query, replace_prefix, self.replacement, status_text
                 );
-                let spaces = width.saturating_sub(left_content.chars().count() + hints.chars().count());
+                let spaces =
+                    width.saturating_sub(left_content.chars().count() + hints.chars().count());
                 let full_bar = format!("{}{:spaces$}{}", left_content, "", hints, spaces = spaces);
                 let trimmed: String = full_bar.chars().take(width).collect();
 

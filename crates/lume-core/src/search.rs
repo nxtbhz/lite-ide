@@ -55,7 +55,10 @@ pub fn find_matches_in_str(
             let hc = char_indices[i + offset].1;
             let mut h_lower = hc.to_lowercase();
             let mut n_lower = nc.to_lowercase();
-            if h_lower.next() != n_lower.next() || h_lower.next().is_some() || n_lower.next().is_some() {
+            if h_lower.next() != n_lower.next()
+                || h_lower.next().is_some()
+                || n_lower.next().is_some()
+            {
                 matched = false;
                 break;
             }
@@ -198,7 +201,9 @@ pub fn find_prev(
     }
 
     let total_lines = buffer.len_lines();
-    let start_line = buffer.byte_to_line(from_byte).min(total_lines.saturating_sub(1));
+    let start_line = buffer
+        .byte_to_line(from_byte)
+        .min(total_lines.saturating_sub(1));
 
     // 1. Search backward from start_line to line 0
     for line in (0..=start_line).rev() {

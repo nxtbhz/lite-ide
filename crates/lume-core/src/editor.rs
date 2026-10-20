@@ -606,12 +606,7 @@ impl Editor {
         true
     }
 
-    pub fn replace_all(
-        &mut self,
-        query: &str,
-        replacement: &str,
-        case_sensitive: bool,
-    ) -> usize {
+    pub fn replace_all(&mut self, query: &str, replacement: &str, case_sensitive: bool) -> usize {
         if query.is_empty() {
             return 0;
         }
@@ -648,7 +643,11 @@ impl Editor {
             if let Ok(del_delta) = tab.buffer.delete(start, end) {
                 if let Ok(ins_delta) = tab.buffer.insert(start, replacement) {
                     last_end = start + ins_delta.new_text.len();
-                    deltas.push(TextDelta::new(start, del_delta.old_text, ins_delta.new_text));
+                    deltas.push(TextDelta::new(
+                        start,
+                        del_delta.old_text,
+                        ins_delta.new_text,
+                    ));
                     delta_offset += replacement.len() as isize - (orig_end - orig_start) as isize;
                 }
             }
@@ -1211,12 +1210,18 @@ mod tests {
         ed.cursors_mut().set_single(0);
         let replaced = ed.replace_current("foo", "qux", true);
         assert!(replaced);
-        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "qux bar foo baz");
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "qux bar foo baz"
+        );
         // Cursor should have jumped to next match
         assert_eq!(ed.cursors().primary().range(), 8..11);
 
         ed.undo();
-        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "foo bar foo baz");
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "foo bar foo baz"
+        );
     }
 
     #[test]
