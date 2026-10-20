@@ -204,6 +204,94 @@ impl FileExplorer {
         }
     }
 
+    pub fn selected_item(&self) -> Option<&ExplorerItem> {
+        self.items.get(self.selected_idx)
+    }
+
+    pub fn target_folder_for_creation(&self) -> PathBuf {
+        if let Some(item) = self.selected_item() {
+            if item.is_dir {
+                item.path.clone()
+            } else {
+                item.path.parent().unwrap_or(&self.root).to_path_buf()
+            }
+        } else {
+            self.root.clone()
+        }
+    }
+
+    pub fn create_folder<P: AsRef<Path>>(
+        &mut self,
+        base_dir: &Path,
+        rel_path: P,
+    ) -> std::io::Result<PathBuf> {
+        let rel = rel_path.as_ref();
+        let rel_str = rel.to_string_lossy();
+        let trimmed = rel_str.trim().trim_matches('/');
+        if trimmed.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Folder name cannot be empty",
+            ));
+        }
+
+        let target = base_dir.join(trimmed);
+        let normalized = if target.is_absolute() {
+            target
+        } else {
+            self.root.join(target)
+        };
+
+        // Prevent escaping root workspace
+        let root_canon = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        if let Ok(canon_base) = base_dir.canonicalize() {
+            if !canon_base.starts_with(&root_canon) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Base directory is outside workspace root",
+                ));
+            }
+        }
+
+        let mut depth_check = base_dir.to_path_buf();
+        for comp in Path::new(trimmed).components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    if !depth_check.pop() || !depth_check.starts_with(&root_canon) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "Path traversal escaping workspace root is forbidden",
+                        ));
+                    }
+                }
+                std::path::Component::Normal(c) => depth_check.push(c),
+                _ => {}
+            }
+        }
+
+        fs::create_dir_all(&normalized)?;
+        let canon_target = normalized.canonicalize().unwrap_or(normalized);
+
+        // Auto-expand all ancestor directories from root down to created folder
+        let mut curr = canon_target.parent();
+        while let Some(parent) = curr {
+            self.expanded_dirs.insert(parent.to_path_buf());
+            if parent == root_canon || !parent.starts_with(&root_canon) {
+                break;
+            }
+            curr = parent.parent();
+        }
+
+        self.refresh();
+
+        // Select the newly created folder in items
+        if let Some(pos) = self.items.iter().position(|it| it.path == canon_target) {
+            self.selected_idx = pos;
+        }
+
+        Ok(canon_target)
+    }
+
     pub fn render<W: Write>(
         &self,
         writer: &mut W,
@@ -508,5 +596,52 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn test_create_single_and_nested_folder() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_mkdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        // 1. Create a single folder in root
+        let created_single = explorer.create_folder(&root_canon, "alpha").unwrap();
+        assert!(created_single.exists());
+        assert!(created_single.is_dir());
+        assert!(explorer.items.iter().any(|item| item.name == "alpha" && item.is_dir));
+
+        // 2. Create nested folders inside alpha: alpha/beta/gamma
+        let created_nested = explorer.create_folder(&created_single, "beta/gamma").unwrap();
+        assert!(created_nested.exists());
+        assert!(created_nested.is_dir());
+
+        // Both beta and gamma's parents must be expanded
+        assert!(explorer.expanded_dirs.contains(&created_single));
+        let beta_path = created_single.join("beta");
+        assert!(explorer.expanded_dirs.contains(&beta_path));
+
+        // Selection should point to the new directory
+        let sel_item = explorer.selected_item().expect("Must have selected item");
+        assert_eq!(sel_item.name, "gamma");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_create_folder_prevents_escaping_root() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_escape_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        let res = explorer.create_folder(&root_canon, "../outside_secret");
+        assert!(res.is_err(), "Must reject path traversal escaping root");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
