@@ -1,6 +1,7 @@
 mod args;
 mod explorer;
 mod prompt;
+mod search;
 
 use args::{parse_cli_args, print_help, CliCommand, CliTargets};
 
