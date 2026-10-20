@@ -115,6 +115,21 @@ impl Default for Editor {
     }
 }
 
+fn matching_closing_pair(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        _ => None,
+    }
+}
+
+fn is_closing_pair(c: char) -> bool {
+    matches!(c, ')' | ']' | '}' | '"' | '\'')
+}
+
 impl Editor {
     pub fn new() -> Self {
         Self {
@@ -825,6 +840,83 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, c: char) -> Result<(), BufferError> {
+        if !self.config.auto_pairs {
+            let mut text = [0u8; 4];
+            let s = c.encode_utf8(&mut text);
+            return self.insert_str(s);
+        }
+
+        let tab = &self.tabs[self.active_tab];
+
+        // Check if overtype applies to all cursors (cursor head right before matching closing char)
+        let can_overtype = tab.cursors.cursors().iter().all(|cur| {
+            if cur.is_selection() || cur.head >= tab.buffer.len_bytes() {
+                false
+            } else {
+                let next_char = tab.buffer.rope().char(tab.buffer.byte_to_char(cur.head));
+                is_closing_pair(c) && next_char == c
+            }
+        });
+
+        if can_overtype && !tab.cursors.cursors().is_empty() {
+            let tab_mut = &mut self.tabs[self.active_tab];
+            let mut new_cursors = Vec::with_capacity(tab_mut.cursors.cursors().len());
+            for cur in tab_mut.cursors.cursors() {
+                let next_byte = cur.head + c.len_utf8();
+                new_cursors.push(Cursor::new(next_byte));
+            }
+            tab_mut.cursors.set_cursors(new_cursors);
+            return Ok(());
+        }
+
+        // Check if auto-pairing applies for opening delimiter
+        if let Some(close_char) = matching_closing_pair(c) {
+            let should_pair = tab.cursors.cursors().iter().all(|cur| {
+                if cur.is_selection() {
+                    false
+                } else if cur.head >= tab.buffer.len_bytes() {
+                    true // EOF
+                } else {
+                    let next_char = tab.buffer.rope().char(tab.buffer.byte_to_char(cur.head));
+                    next_char == ' ' || next_char == '\t' || next_char == '\n' || next_char == '\r'
+                }
+            });
+
+            if should_pair && !tab.cursors.cursors().is_empty() {
+                let tab_mut = &mut self.tabs[self.active_tab];
+                let cursors_before = tab_mut.cursors.cursors().to_vec();
+
+                let mut sorted_cursors = cursors_before.clone();
+                sorted_cursors.sort_by_key(|cur| (cur.min(), cur.max()));
+
+                let pair_str = format!("{}{}", c, close_char);
+                let mut deltas: Vec<TextDelta> = Vec::new();
+                let mut new_cursors: Vec<Cursor> = Vec::new();
+                let mut delta_offset: isize = 0;
+
+                for cur in sorted_cursors {
+                    let start = (cur.min() as isize + delta_offset) as usize;
+                    let ins_delta = tab_mut.buffer.insert(start, &pair_str)?;
+                    // Cursor placed in the middle of pair
+                    let new_pos = start + c.len_utf8();
+                    new_cursors.push(Cursor::new(new_pos));
+
+                    deltas.push(TextDelta::new(start, String::new(), ins_delta.new_text));
+                    delta_offset += pair_str.len() as isize;
+                }
+
+                tab_mut.cursors.set_cursors(new_cursors);
+                let cursors_after = tab_mut.cursors.cursors().to_vec();
+
+                tab_mut
+                    .history
+                    .record_edits(deltas.clone(), cursors_before, cursors_after);
+                self.record_edit_internal(&deltas);
+                return Ok(());
+            }
+        }
+
+        // Standard character insertion fallback
         let mut text = [0u8; 4];
         let s = c.encode_utf8(&mut text);
         self.insert_str(s)
@@ -2016,5 +2108,132 @@ mod tests {
             "    "
         );
         assert_eq!(ed.cursor_line_col(), (0, 4));
+    }
+
+    #[test]
+    fn test_auto_pairs_triggers_before_whitespace_newline_and_eof() {
+        let pairs = [('(', ")"), ('[', "]"), ('{', "}"), ('"', "\""), ('\'', "'")];
+
+        // Case 1: At EOF
+        for &(open, close) in &pairs {
+            let mut ed = Editor::new();
+            ed.insert_char(open).unwrap();
+            let expected = format!("{}{}", open, close);
+            assert_eq!(
+                ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+                expected
+            );
+            assert_eq!(ed.cursor_line_col(), (0, 1)); // Cursor inside pair
+        }
+
+        // Case 2: Before space
+        for &(open, close) in &pairs {
+            let mut ed = Editor::new();
+            ed.insert_str(" ").unwrap();
+            ed.cursors_mut().set_single(0);
+            ed.insert_char(open).unwrap();
+            let expected = format!("{}{} ", open, close);
+            assert_eq!(
+                ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+                expected
+            );
+            assert_eq!(ed.cursor_line_col(), (0, 1));
+        }
+
+        // Case 3: Before newline
+        for &(open, close) in &pairs {
+            let mut ed = Editor::new();
+            ed.insert_str("\n").unwrap();
+            ed.cursors_mut().set_single(0);
+            ed.insert_char(open).unwrap();
+            let expected = format!("{}{}\n", open, close);
+            assert_eq!(
+                ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+                expected
+            );
+            assert_eq!(ed.cursor_line_col(), (0, 1));
+        }
+    }
+
+    #[test]
+    fn test_auto_pairs_does_not_trigger_before_identifier_or_punctuation() {
+        let mut ed = Editor::new();
+        ed.insert_str("foo;").unwrap();
+        ed.cursors_mut().set_single(0);
+
+        // Before 'f': should only insert '('
+        ed.insert_char('(').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "(foo;"
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 1));
+
+        // Move before ';': should only insert '"'
+        ed.cursors_mut().set_single(4);
+        ed.insert_char('"').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "(foo\";"
+        );
+    }
+
+    #[test]
+    fn test_auto_pairs_overtype_closing_delimiters() {
+        let mut ed = Editor::new();
+        // Type '(' -> '()' with cursor inside
+        ed.insert_char('(').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "()"
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 1));
+
+        // Type ')' -> overtypes, advancing cursor past ')' without inserting duplicate
+        ed.insert_char(')').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "()"
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 2));
+
+        // Quotes overtype
+        let mut ed2 = Editor::new();
+        ed2.insert_char('"').unwrap();
+        assert_eq!(ed2.cursor_line_col(), (0, 1));
+        ed2.insert_char('"').unwrap();
+        assert_eq!(
+            ed2.buffer().slice_to_cow(0, ed2.buffer().len_bytes()),
+            "\"\""
+        );
+        assert_eq!(ed2.cursor_line_col(), (0, 2));
+    }
+
+    #[test]
+    fn test_auto_pairs_disabled() {
+        let mut ed = Editor::new();
+        ed.config_mut().auto_pairs = false;
+        ed.insert_char('(').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "("
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 1));
+    }
+
+    #[test]
+    fn test_auto_pairs_undo_atomic() {
+        let mut ed = Editor::new();
+        ed.insert_char('{').unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "{}"
+        );
+        ed.undo();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            ""
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 0));
     }
 }
