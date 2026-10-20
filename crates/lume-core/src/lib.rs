@@ -4,6 +4,7 @@ pub mod cursor;
 pub mod editor;
 pub mod history;
 pub mod journal;
+pub mod search;
 
 pub use autosave::{AutoSaveConfig, AutoSaveController};
 pub use buffer::{BufferError, RopeBuffer, TextBuffer, TextDelta};
