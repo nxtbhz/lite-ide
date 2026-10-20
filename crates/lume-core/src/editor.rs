@@ -543,39 +543,25 @@ impl Editor {
         let sel_min = primary.min();
         let sel_max = primary.max();
 
-        let target_match = if primary.is_selection() {
+        let is_match_selected = if primary.is_selection() {
             let selected_text = tab.buffer.slice_to_cow(sel_min, sel_max);
-            let matches = if case_sensitive {
+            if case_sensitive {
                 selected_text == query
             } else {
                 selected_text.eq_ignore_ascii_case(query)
                     || selected_text.to_lowercase() == query.to_lowercase()
-            };
-            if matches {
-                Some((sel_min, sel_max))
-            } else {
-                crate::search::find_next(&tab.buffer, query, primary.head, case_sensitive)
             }
         } else {
-            // Check if cursor is on or near match, otherwise search from head
-            let check_start = primary.head.saturating_sub(query.len());
-            if let Some((s, e)) =
-                crate::search::find_next(&tab.buffer, query, check_start, case_sensitive)
-            {
-                if s <= primary.head && primary.head <= e {
-                    Some((s, e))
-                } else {
-                    crate::search::find_next(&tab.buffer, query, primary.head, case_sensitive)
-                }
-            } else {
-                crate::search::find_next(&tab.buffer, query, primary.head, case_sensitive)
-            }
+            false
         };
 
-        let (target_start, target_end) = match target_match {
-            Some(range) => range,
-            None => return false,
-        };
+        if !is_match_selected {
+            // Preview: select next match if available, without modifying buffer
+            return self.find_next(query, case_sensitive).is_some() && false;
+        }
+
+        let target_start = sel_min;
+        let target_end = sel_max;
 
         let tab = &mut self.tabs[self.active_tab];
         let cursors_before = tab.cursors.cursors().to_vec();
@@ -1206,8 +1192,9 @@ mod tests {
     #[test]
     fn test_editor_replace_current_and_undo() {
         let mut ed = Editor::from_str("foo bar foo baz");
-        // Place cursor at match 0..3
-        ed.cursors_mut().set_single(0);
+        // Find and select first match 0..3
+        ed.find_next("foo", true);
+        assert_eq!(ed.cursors().primary().range(), 0..3);
         let replaced = ed.replace_current("foo", "qux", true);
         assert!(replaced);
         assert_eq!(
@@ -1222,6 +1209,54 @@ mod tests {
             ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
             "foo bar foo baz"
         );
+    }
+
+    #[test]
+    fn test_editor_replace_current_preview_when_unselected() {
+        let mut ed = Editor::from_str("foo bar foo baz");
+        // Place cursor at offset 4 (on "bar", not selecting "foo")
+        ed.cursors_mut().set_single(4);
+        let replaced = ed.replace_current("foo", "qux", true);
+        // Should NOT destructively replace yet; previews by selecting next match at 8..11
+        assert!(!replaced);
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "foo bar foo baz"
+        );
+        assert_eq!(ed.cursors().primary().range(), 8..11);
+
+        // Subsequent replace_current with match selected replaces it
+        let replaced_now = ed.replace_current("foo", "qux", true);
+        assert!(replaced_now);
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "foo bar qux baz"
+        );
+    }
+
+    #[test]
+    fn test_editor_replace_all_50_plus_atomic_and_multibyte_asymmetric() {
+        let mut initial = String::new();
+        for i in 0..60 {
+            initial.push_str(&format!("item_ação_{} ", i));
+        }
+        let mut ed = Editor::from_str(&initial);
+        let count = ed.replace_all("item_ação", "🚀_novo_item_longo", true);
+        assert_eq!(count, 60);
+
+        // Single atomic undo restores exact original string
+        assert!(ed.undo());
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            initial
+        );
+
+        // Redo restores all 60
+        assert!(ed.redo());
+        assert!(!ed
+            .buffer()
+            .slice_to_cow(0, ed.buffer().len_bytes())
+            .contains("item_ação"));
     }
 
     #[test]

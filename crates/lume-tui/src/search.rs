@@ -126,6 +126,21 @@ impl SearchState {
         }
     }
 
+    pub fn handle_delete(&mut self) {
+        match self.active_field {
+            SearchField::Query => {
+                if self.query_cursor < self.query.len() {
+                    self.query.remove(self.query_cursor);
+                }
+            }
+            SearchField::Replacement => {
+                if self.replacement_cursor < self.replacement.len() {
+                    self.replacement.remove(self.replacement_cursor);
+                }
+            }
+        }
+    }
+
     pub fn move_left(&mut self) {
         match self.active_field {
             SearchField::Query => {
@@ -214,7 +229,7 @@ impl SearchState {
                 } else {
                     format!(" [{}/{}] ", self.active_match_idx + 1, self.match_count)
                 };
-                let hints = " (Enter/F3: Next, Shift+Enter/F3: Prev, Esc: Cancel) ";
+                let hints = " (Enter/F3: Next, Shift+Enter/Shift+F3: Prev, Esc: Cancel) ";
 
                 cursor_col =
                     prefix.chars().count() + self.query[..self.query_cursor].chars().count();

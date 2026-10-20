@@ -390,7 +390,6 @@ impl App {
         } else {
             state.match_count =
                 lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
-            state.active_match_idx = 0;
             let from = state.initial_cursor.min();
             if let Some((s, e)) =
                 lume_core::search::find_next(self.editor.buffer(), &state.query, from, false)
@@ -398,7 +397,17 @@ impl App {
                 let primary = self.editor.cursors_mut().primary_mut();
                 primary.anchor = s;
                 primary.head = e;
+                state.active_match_idx = lume_core::search::find_matches_in_range(
+                    self.editor.buffer(),
+                    &state.query,
+                    0,
+                    s,
+                    false,
+                )
+                .len();
                 self.adjust_viewport();
+            } else {
+                state.active_match_idx = 0;
             }
         }
     }
@@ -670,13 +679,9 @@ impl App {
                             .iter()
                             .find(|(s, e)| *s <= char_byte && char_byte < *e);
 
-                        if is_selected {
-                            queue!(
-                                writer,
-                                SetBackgroundColor(Color::DarkBlue),
-                                SetForegroundColor(Color::White)
-                            )?;
-                        } else if let Some(&(ms, me)) = search_match {
+                        if let (Some(ref _search), Some(&(ms, me))) =
+                            (&self.search_state, search_match)
+                        {
                             let is_active = primary_cursor.range() == (ms..me);
                             if is_active {
                                 queue!(
@@ -699,6 +704,12 @@ impl App {
                                     SetForegroundColor(Color::White)
                                 )?;
                             }
+                        } else if is_selected {
+                            queue!(
+                                writer,
+                                SetBackgroundColor(Color::DarkBlue),
+                                SetForegroundColor(Color::White)
+                            )?;
                         } else {
                             // Syntax color via binary search on current line's tokens
                             let token_type = line_tokens
@@ -1101,7 +1112,16 @@ impl App {
                 if !state.query.is_empty() {
                     state.match_count =
                         lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
-                    let _ = self.editor.find_next(&state.query, false);
+                    if let Some((s, _e)) = self.editor.find_next(&state.query, false) {
+                        state.active_match_idx = lume_core::search::find_matches_in_range(
+                            self.editor.buffer(),
+                            &state.query,
+                            0,
+                            s,
+                            false,
+                        )
+                        .len();
+                    }
                     self.adjust_viewport();
                 }
                 self.search_state = Some(state);
@@ -1123,7 +1143,16 @@ impl App {
                 if !state.query.is_empty() {
                     state.match_count =
                         lume_core::search::count_matches(self.editor.buffer(), &state.query, false);
-                    let _ = self.editor.find_next(&state.query, false);
+                    if let Some((s, _e)) = self.editor.find_next(&state.query, false) {
+                        state.active_match_idx = lume_core::search::find_matches_in_range(
+                            self.editor.buffer(),
+                            &state.query,
+                            0,
+                            s,
+                            false,
+                        )
+                        .len();
+                    }
                     self.adjust_viewport();
                 }
                 self.search_state = Some(state);
@@ -1366,15 +1395,62 @@ impl App {
             }
 
             match key.code {
+                KeyCode::Char('z') if ctrl && !alt => {
+                    if self.editor.undo() {
+                        self.set_status("Undo");
+                        state.match_count = lume_core::search::count_matches(
+                            self.editor.buffer(),
+                            &state.query,
+                            false,
+                        );
+                        let cur_head = self.editor.cursors().primary().min();
+                        state.active_match_idx = lume_core::search::find_matches_in_range(
+                            self.editor.buffer(),
+                            &state.query,
+                            0,
+                            cur_head,
+                            false,
+                        )
+                        .len();
+                        self.adjust_viewport();
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Char('y') if ctrl && !alt => {
+                    if self.editor.redo() {
+                        self.set_status("Redo");
+                        state.match_count = lume_core::search::count_matches(
+                            self.editor.buffer(),
+                            &state.query,
+                            false,
+                        );
+                        let cur_head = self.editor.cursors().primary().min();
+                        state.active_match_idx = lume_core::search::find_matches_in_range(
+                            self.editor.buffer(),
+                            &state.query,
+                            0,
+                            cur_head,
+                            false,
+                        )
+                        .len();
+                        self.adjust_viewport();
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
                 KeyCode::Esc => {
-                    self.editor
-                        .cursors_mut()
-                        .set_cursors(vec![state.initial_cursor]);
+                    let max_bytes = self.editor.buffer().len_bytes();
+                    let mut cur = state.initial_cursor;
+                    cur.anchor = cur.anchor.min(max_bytes);
+                    cur.head = cur.head.min(max_bytes);
+                    self.editor.cursors_mut().set_cursors(vec![cur]);
                     self.scroll_row = state.initial_scroll.0;
                     self.scroll_col = state.initial_scroll.1;
                     if !state.query.is_empty() {
                         self.last_search_query = Some(state.query.clone());
                     }
+                    self.adjust_viewport();
                     self.search_state = None;
                     return Ok(());
                 }
@@ -1385,15 +1461,40 @@ impl App {
                     self.search_state = Some(state);
                     return Ok(());
                 }
-                KeyCode::Enter | KeyCode::F(3) => {
+                KeyCode::F(3) => {
+                    if !state.query.is_empty() {
+                        let res = if shift {
+                            self.editor.find_prev(&state.query, false)
+                        } else {
+                            self.editor.find_next(&state.query, false)
+                        };
+                        if let Some((s, _e)) = res {
+                            state.active_match_idx = lume_core::search::find_matches_in_range(
+                                self.editor.buffer(),
+                                &state.query,
+                                0,
+                                s,
+                                false,
+                            )
+                            .len();
+                            self.adjust_viewport();
+                        }
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Enter => {
                     if shift {
                         if !state.query.is_empty() {
-                            if let Some((_s, _e)) = self.editor.find_prev(&state.query, false) {
-                                if state.match_count > 0 {
-                                    state.active_match_idx =
-                                        (state.active_match_idx + state.match_count - 1)
-                                            % state.match_count;
-                                }
+                            if let Some((s, _e)) = self.editor.find_prev(&state.query, false) {
+                                state.active_match_idx = lume_core::search::find_matches_in_range(
+                                    self.editor.buffer(),
+                                    &state.query,
+                                    0,
+                                    s,
+                                    false,
+                                )
+                                .len();
                                 self.adjust_viewport();
                             }
                         }
@@ -1411,13 +1512,26 @@ impl App {
                         if replaced {
                             self.set_status("Ocorrência substituída");
                         }
+                        let cur_head = self.editor.cursors().primary().min();
+                        state.active_match_idx = lume_core::search::find_matches_in_range(
+                            self.editor.buffer(),
+                            &state.query,
+                            0,
+                            cur_head,
+                            false,
+                        )
+                        .len();
                         self.adjust_viewport();
                     } else if !state.query.is_empty() {
-                        if let Some((_s, _e)) = self.editor.find_next(&state.query, false) {
-                            if state.match_count > 0 {
-                                state.active_match_idx =
-                                    (state.active_match_idx + 1) % state.match_count;
-                            }
+                        if let Some((s, _e)) = self.editor.find_next(&state.query, false) {
+                            state.active_match_idx = lume_core::search::find_matches_in_range(
+                                self.editor.buffer(),
+                                &state.query,
+                                0,
+                                s,
+                                false,
+                            )
+                            .len();
                             self.adjust_viewport();
                         }
                     }
@@ -1446,6 +1560,14 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     state.handle_backspace();
+                    if state.active_field == SearchField::Query {
+                        self.update_search_query(&mut state);
+                    }
+                    self.search_state = Some(state);
+                    return Ok(());
+                }
+                KeyCode::Delete => {
+                    state.handle_delete();
                     if state.active_field == SearchField::Query {
                         self.update_search_query(&mut state);
                     }
@@ -2071,8 +2193,9 @@ mod tests {
             "result other result extra result"
         );
 
-        // First undo reverts the atomic replace_all
-        app.execute_command("edit.undo");
+        // First undo via Ctrl+Z while search bar is still open reverts the atomic replace_all
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+            .unwrap();
         assert_eq!(
             app.editor
                 .buffer()
@@ -2080,14 +2203,105 @@ mod tests {
             "result other val extra val"
         );
 
-        // Second undo reverts the earlier single replace_current
-        app.execute_command("edit.undo");
+        // Second undo via Ctrl+Z reverts the earlier single replace_current
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+            .unwrap();
         assert_eq!(
             app.editor
                 .buffer()
                 .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "val other val extra val"
         );
+    }
+
+    #[test]
+    fn test_app_search_esc_clamps_cursor_when_file_shortened() {
+        let mut app = App::new(None).unwrap();
+        app.editor
+            .insert_str("a long text that will be drastically shortened")
+            .unwrap();
+        let len = app.editor.buffer().len_bytes();
+        app.editor.cursors_mut().set_single(len);
+
+        // Open Ctrl+H
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        // Shorten buffer
+        let _ = app.editor.replace_all(
+            "a long text that will be drastically shortened",
+            "short",
+            false,
+        );
+        assert_eq!(app.editor.buffer().len_bytes(), 5);
+
+        // Press Esc: must not panic on restoring pre-search cursor (> 5)
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.search_state.is_none());
+        assert_eq!(app.editor.cursors().primary().head, 5);
+    }
+
+    #[test]
+    fn test_app_f3_on_replacement_field_navigates_without_replacing() {
+        let mut app = App::new(None).unwrap();
+        app.editor.insert_str("cat dog cat bird cat").unwrap();
+        app.editor.cursors_mut().set_single(0);
+
+        // Open Replace mode
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+            .unwrap();
+        // Type query "cat"
+        for c in "cat".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        // Switch to Replacement field
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for c in "lion".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        // Press F3: should advance search to match 2, NOT replace!
+        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "cat dog cat bird cat"
+        );
+        assert_eq!(app.editor.cursors().primary().range(), 8..11);
+    }
+
+    #[test]
+    fn test_app_active_match_idx_sync() {
+        let mut app = App::new(None).unwrap();
+        app.editor
+            .insert_str("zero one match one match two match three match")
+            .unwrap();
+        // Place initial cursor before match #2 (at offset 18)
+        app.editor.cursors_mut().set_single(18);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .unwrap();
+        for c in "match".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        // Active match should be match #2 (index 1), with total 4 matches
+        let state = app.search_state.as_ref().unwrap();
+        assert_eq!(state.match_count, 4);
+        assert_eq!(state.active_match_idx, 1);
+
+        // Advance to match #3
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        let state = app.search_state.as_ref().unwrap();
+        assert_eq!(state.active_match_idx, 2);
     }
 
     #[test]

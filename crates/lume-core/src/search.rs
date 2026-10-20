@@ -228,6 +228,37 @@ pub fn find_prev(
     None
 }
 
+/// Count total non-overlapping occurrences of `needle` in `haystack` without extra allocations.
+pub fn count_matches_in_str(haystack: &str, needle: &str, case_sensitive: bool) -> usize {
+    if needle.is_empty() || haystack.is_empty() || needle.len() > haystack.len() {
+        return 0;
+    }
+
+    if case_sensitive {
+        let mut count = 0;
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(needle) {
+            count += 1;
+            start += pos + needle.len();
+        }
+        return count;
+    }
+
+    if haystack.is_ascii() && needle.is_ascii() {
+        let lower_haystack = haystack.to_ascii_lowercase();
+        let lower_needle = needle.to_ascii_lowercase();
+        let mut count = 0;
+        let mut start = 0;
+        while let Some(pos) = lower_haystack[start..].find(&lower_needle) {
+            count += 1;
+            start += pos + lower_needle.len();
+        }
+        return count;
+    }
+
+    find_matches_in_str(haystack, needle, case_sensitive).len()
+}
+
 /// Count total non-overlapping occurrences of `needle` in `buffer`.
 pub fn count_matches(buffer: &RopeBuffer, needle: &str, case_sensitive: bool) -> usize {
     if needle.is_empty() || buffer.len_bytes() == 0 {
@@ -236,12 +267,19 @@ pub fn count_matches(buffer: &RopeBuffer, needle: &str, case_sensitive: bool) ->
 
     if needle.contains('\n') {
         let text = buffer.slice_to_cow(0, buffer.len_bytes());
-        return find_matches_in_str(&text, needle, case_sensitive).len();
+        return count_matches_in_str(&text, needle, case_sensitive);
     }
 
     let mut count = 0;
-    for line in 0..buffer.len_lines() {
-        count += line_matches(buffer, line, needle, case_sensitive).len();
+    for line_idx in 0..buffer.len_lines() {
+        if let Some(line) = buffer.line(line_idx) {
+            if let Some(as_str) = line.as_str() {
+                count += count_matches_in_str(as_str, needle, case_sensitive);
+            } else {
+                let s = line.to_string();
+                count += count_matches_in_str(&s, needle, case_sensitive);
+            }
+        }
     }
     count
 }
