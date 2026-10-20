@@ -29,6 +29,7 @@ pub struct FileExplorer {
 
 impl FileExplorer {
     pub fn new(root: PathBuf) -> Self {
+        let root = root.canonicalize().unwrap_or(root);
         let mut expanded_dirs = HashSet::new();
         expanded_dirs.insert(root.clone());
 
@@ -52,8 +53,16 @@ impl FileExplorer {
         if self.items.is_empty() {
             self.selected_idx = 0;
             self.scroll_offset = 0;
-        } else if self.selected_idx >= self.items.len() {
-            self.selected_idx = self.items.len() - 1;
+        } else {
+            if self.selected_idx >= self.items.len() {
+                self.selected_idx = self.items.len() - 1;
+            }
+            if self.scroll_offset >= self.items.len() {
+                self.scroll_offset = self.selected_idx;
+            }
+            if self.selected_idx < self.scroll_offset {
+                self.scroll_offset = self.selected_idx;
+            }
         }
     }
 
@@ -227,20 +236,38 @@ impl FileExplorer {
     ) -> std::io::Result<PathBuf> {
         let rel = rel_path.as_ref();
         let rel_str = rel.to_string_lossy();
-        let trimmed = rel_str.trim().trim_matches('/');
-        if trimmed.is_empty() {
+        let trimmed_input = rel_str.trim();
+        if trimmed_input.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Folder name cannot be empty",
             ));
         }
 
-        let target = base_dir.join(trimmed);
-        let normalized = if target.is_absolute() {
-            target
-        } else {
-            self.root.join(target)
-        };
+        // Check if raw input is absolute or contains drive prefixes
+        if rel.is_absolute()
+            || trimmed_input.starts_with('/')
+            || trimmed_input.starts_with('\\')
+            || Path::new(trimmed_input).components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Absolute paths or drive prefixes are forbidden",
+            ));
+        }
+
+        let trimmed = trimmed_input.trim_end_matches(|c| c == '/' || c == '\\');
+        if trimmed.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Folder name cannot be empty",
+            ));
+        }
 
         // Prevent escaping root workspace
         let root_canon = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
@@ -256,6 +283,12 @@ impl FileExplorer {
         let mut depth_check = base_dir.to_path_buf();
         for comp in Path::new(trimmed).components() {
             match comp {
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Absolute paths or drive prefixes are forbidden",
+                    ));
+                }
                 std::path::Component::ParentDir => {
                     if !depth_check.pop() || !depth_check.starts_with(&root_canon) {
                         return Err(std::io::Error::new(
@@ -269,8 +302,22 @@ impl FileExplorer {
             }
         }
 
+        let normalized = if base_dir.is_absolute() || base_dir.starts_with(&self.root) {
+            base_dir.join(trimmed)
+        } else {
+            self.root.join(base_dir).join(trimmed)
+        };
+
         fs::create_dir_all(&normalized)?;
-        let canon_target = normalized.canonicalize().unwrap_or(normalized);
+        let canon_target = normalized.canonicalize().unwrap_or(normalized.clone());
+
+        if !canon_target.starts_with(&root_canon) {
+            let _ = fs::remove_dir_all(&canon_target);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Target directory resolved outside workspace root",
+            ));
+        }
 
         // Auto-expand all ancestor directories from root down to created folder
         let mut curr = canon_target.parent();
@@ -285,8 +332,15 @@ impl FileExplorer {
         self.refresh();
 
         // Select the newly created folder in items
-        if let Some(pos) = self.items.iter().position(|it| it.path == canon_target) {
+        if let Some(pos) = self
+            .items
+            .iter()
+            .position(|it| it.path == canon_target || it.path == normalized)
+        {
             self.selected_idx = pos;
+            if pos < self.scroll_offset {
+                self.scroll_offset = pos;
+            }
         }
 
         Ok(canon_target)
@@ -321,13 +375,10 @@ impl FileExplorer {
         fs::remove_dir_all(&target_canon)?;
 
         // Prune deleted directory and all descendants from expanded_dirs
-        self.expanded_dirs.retain(|p| !p.starts_with(&target_canon));
+        self.expanded_dirs
+            .retain(|p| !p.starts_with(&target_canon) && !p.starts_with(target));
 
         self.refresh();
-
-        if !self.items.is_empty() && self.selected_idx >= self.items.len() {
-            self.selected_idx = self.items.len() - 1;
-        }
 
         Ok(target_canon)
     }
@@ -736,6 +787,54 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
         assert!(tmp_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_create_folder_prevents_absolute_and_prefix_paths() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_abs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        let res = explorer.create_folder(&root_canon, "/absolute_outside");
+        assert!(res.is_err(), "Must reject absolute paths");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_explorer_delete_preserves_scroll_offset_no_blank_sidebar() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_scroll_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut explorer = FileExplorer::new(tmp_dir.clone());
+        let root_canon = std::fs::canonicalize(&tmp_dir).unwrap();
+
+        // Create 10 directories
+        for i in 0..10 {
+            explorer.create_folder(&root_canon, format!("dir_{:02}", i)).unwrap();
+        }
+        assert_eq!(explorer.items.len(), 10);
+
+        // Simulate scrolled viewport
+        explorer.scroll_offset = 8;
+        explorer.selected_idx = 9;
+
+        // Delete multiple directories to shrink items to 3
+        for i in 3..10 {
+            let p = root_canon.join(format!("dir_{:02}", i));
+            explorer.delete_folder(&p).unwrap();
+        }
+        assert_eq!(explorer.items.len(), 3);
+
+        // scroll_offset must be clamped so it does not render a blank sidebar
+        assert!(explorer.scroll_offset < explorer.items.len(), "scroll_offset was not clamped!");
+        assert!(explorer.scroll_offset <= explorer.selected_idx, "scroll_offset must not exceed selected_idx");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

@@ -3,6 +3,7 @@ use crossterm::{
     queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ pub enum PromptAction {
 #[derive(Clone, Debug)]
 pub struct InputPrompt {
     pub action: PromptAction,
-    pub title: &'static str,
+    pub title: Cow<'static, str>,
     pub value: String,
     pub cursor_pos: usize,
     pub suggestions: Vec<String>,
@@ -30,7 +31,7 @@ impl InputPrompt {
     pub fn open_file() -> Self {
         let mut prompt = Self {
             action: PromptAction::OpenFile,
-            title: " Open File (Enter: open, Tab: autocomplete, Esc: cancel) ",
+            title: Cow::Borrowed(" Open File (Enter: open, Tab: autocomplete, Esc: cancel) "),
             value: String::new(),
             cursor_pos: 0,
             suggestions: Vec::new(),
@@ -45,7 +46,7 @@ impl InputPrompt {
         let len = initial.len();
         let mut prompt = Self {
             action: PromptAction::SaveFileAs,
-            title: " Save File As (Enter: save, Esc: cancel) ",
+            title: Cow::Borrowed(" Save File As (Enter: save, Esc: cancel) "),
             value: initial,
             cursor_pos: len,
             suggestions: Vec::new(),
@@ -59,7 +60,7 @@ impl InputPrompt {
         let suggestions: Vec<String> = all_langs.iter().map(|s| s.to_string()).collect();
         Self {
             action: PromptAction::SetLanguage,
-            title: " Select Language Mode (Type to filter, Enter: apply, Esc: cancel) ",
+            title: Cow::Borrowed(" Select Language Mode (Type to filter, Enter: apply, Esc: cancel) "),
             value: String::new(),
             cursor_pos: 0,
             suggestions,
@@ -69,10 +70,9 @@ impl InputPrompt {
 
     pub fn create_folder(parent_dir: PathBuf, display_name: &str) -> Self {
         let formatted = format!(" Create Folder in '{}' (Enter: create, Esc: cancel) ", display_name);
-        let title: &'static str = Box::leak(formatted.into_boxed_str());
         Self {
             action: PromptAction::CreateFolder { parent_dir },
-            title,
+            title: Cow::Owned(formatted),
             value: String::new(),
             cursor_pos: 0,
             suggestions: Vec::new(),
@@ -83,10 +83,9 @@ impl InputPrompt {
     pub fn confirm_delete_folder(path: PathBuf) -> Self {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
         let formatted = format!(" Delete folder '{}' and all contents? (y/Enter: confirm, Esc: cancel) ", name);
-        let title: &'static str = Box::leak(formatted.into_boxed_str());
         Self {
             action: PromptAction::ConfirmDeleteFolder { path },
-            title,
+            title: Cow::Owned(formatted),
             value: String::new(),
             cursor_pos: 0,
             suggestions: Vec::new(),

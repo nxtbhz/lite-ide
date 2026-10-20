@@ -1006,12 +1006,25 @@ impl App {
     }
 
     pub fn handle_deleted_folder_tabs(&mut self, folder_path: &std::path::Path) {
-        let folder_canon = folder_path.canonicalize().unwrap_or_else(|_| folder_path.to_path_buf());
+        let folder_canon = folder_path.canonicalize().unwrap_or_else(|_| {
+            if folder_path.is_absolute() {
+                folder_path.to_path_buf()
+            } else {
+                self.explorer.root.join(folder_path)
+            }
+        });
         for tab in self.editor.tabs_mut() {
             if let Some(ref p) = tab.file_path {
-                let p_canon = p.canonicalize().unwrap_or_else(|_| p.clone());
-                if p_canon.starts_with(&folder_canon) {
+                let p_abs = if p.is_absolute() {
+                    p.clone()
+                } else {
+                    self.explorer.root.join(p)
+                };
+                let p_canon = p.canonicalize().unwrap_or_else(|_| p_abs.clone());
+                if p_canon.starts_with(&folder_canon) || p_abs.starts_with(&folder_canon) {
                     let _ = lume_core::Journal::remove(p);
+                    let _ = lume_core::Journal::remove(&p_canon);
+                    let _ = lume_core::Journal::remove(&p_abs);
                     tab.file_path = None;
                     tab.is_dirty = true;
                 }
@@ -1126,9 +1139,9 @@ impl App {
                         PromptAction::ConfirmDeleteFolder { path } => {
                             let should_delete = val.is_empty() || val.eq_ignore_ascii_case("y") || val.eq_ignore_ascii_case("yes");
                             if should_delete {
+                                self.handle_deleted_folder_tabs(&path);
                                 match self.explorer.delete_folder(&path) {
                                     Ok(deleted) => {
-                                        self.handle_deleted_folder_tabs(&deleted);
                                         self.set_status(format!("Deleted folder: {}", deleted.display()));
                                     }
                                     Err(e) => self.set_status(format!("Delete error: {}", e)),
@@ -1337,13 +1350,16 @@ impl App {
                 KeyCode::Tab | KeyCode::Esc => {
                     self.focus = ActiveFocus::Editor;
                 }
-                KeyCode::Char('n') | KeyCode::Char('a') => {
+                KeyCode::Char('n') | KeyCode::Char('a') if !ctrl && !alt => {
                     self.execute_command("explorer.new_folder");
                 }
-                KeyCode::Char('d') | KeyCode::Delete => {
+                KeyCode::Char('d') if !ctrl && !alt => {
                     self.execute_command("explorer.delete_folder");
                 }
-                KeyCode::Char('r') => {
+                KeyCode::Delete => {
+                    self.execute_command("explorer.delete_folder");
+                }
+                KeyCode::Char('r') if !ctrl && !alt => {
                     self.execute_command("explorer.refresh");
                 }
                 _ => {}
@@ -2135,5 +2151,58 @@ mod tests {
         assert!(app.editor.file_path().is_none());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_delete_folder_unlinks_relative_path_tabs_and_cleans_journal() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_rel_unlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let sub_folder = tmp_dir.join("pkg");
+        std::fs::create_dir_all(&sub_folder).unwrap();
+        let sub_file = sub_folder.join("lib.rs");
+        std::fs::write(&sub_file, "pub fn hello() {}").unwrap();
+
+        let mut app = App::from_paths(&[&tmp_dir]).unwrap();
+        // Open tab with a relative path: "pkg/lib.rs"
+        let rel_file = PathBuf::from("pkg/lib.rs");
+        app.editor.open_or_load(tmp_dir.join(&rel_file)).unwrap();
+        // Explicitly set relative path on tab to test relative unlinking robustness
+        app.editor.set_file_path(Some(rel_file.clone()));
+        // Create crash journal for it
+        let canon_file = std::fs::canonicalize(&sub_file).unwrap();
+        lume_core::Journal::record(&canon_file, "unsaved content").unwrap();
+        assert!(lume_core::Journal::has_journal(&canon_file));
+
+        app.focus = ActiveFocus::Explorer;
+        let pkg_canon = std::fs::canonicalize(&sub_folder).unwrap();
+        // Delete folder via command / app
+        app.handle_deleted_folder_tabs(&pkg_canon);
+        app.explorer.delete_folder(&pkg_canon).unwrap();
+
+        // The relative tab must be unlinked
+        assert!(app.editor.file_path().is_none());
+        assert!(app.editor.is_dirty());
+        // Journal must have been removed
+        assert!(!lume_core::Journal::has_journal(&canon_file));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_explorer_ignores_ctrl_modifiers_on_char_actions() {
+        let mut app = App::new(None).unwrap();
+        app.focus = ActiveFocus::Explorer;
+
+        // Ctrl+A should NOT open new folder prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.prompt.is_none(), "Ctrl+A should not open prompt in explorer");
+
+        // Ctrl+D should NOT open delete prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.prompt.is_none(), "Ctrl+D should not open prompt in explorer");
     }
 }
