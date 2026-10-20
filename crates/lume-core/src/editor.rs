@@ -957,6 +957,9 @@ impl Editor {
         let mut new_cursors: Vec<Cursor> = Vec::new();
         let mut delta_offset: isize = 0;
 
+        let tab_size = self.config.tab_size;
+        let smart_unindent = self.config.smart_unindent;
+
         for cursor in sorted_cursors {
             let start = (cursor.min() as isize + delta_offset) as usize;
             let end = (cursor.max() as isize + delta_offset) as usize;
@@ -971,12 +974,30 @@ impl Editor {
                     new_cursors.push(Cursor::new(start));
                 }
             } else if start > 0 && start <= tab.buffer.len_bytes() {
-                let char_idx = tab.buffer.byte_to_char(start);
-                let prev_byte = tab.buffer.char_to_byte(char_idx - 1);
-                let delta = tab.buffer.delete(prev_byte, start)?;
+                // Check for smart unindent condition
+                let line = tab.buffer.byte_to_line(start);
+                let line_start_char = tab.buffer.rope().line_to_char(line);
+                let line_start_byte = tab.buffer.char_to_byte(line_start_char);
+                let cursor_char = tab.buffer.byte_to_char(start);
+                let col = cursor_char.saturating_sub(line_start_char);
+
+                let prefix = tab.buffer.slice_to_cow(line_start_byte, start);
+                let is_all_spaces = !prefix.is_empty() && prefix.chars().all(|c| c == ' ');
+                let can_unindent =
+                    smart_unindent && is_all_spaces && (col > 0 && col % tab_size == 0);
+
+                let delete_from_byte = if can_unindent {
+                    let target_char = cursor_char - tab_size;
+                    tab.buffer.char_to_byte(target_char)
+                } else {
+                    let prev_char = tab.buffer.byte_to_char(start) - 1;
+                    tab.buffer.char_to_byte(prev_char)
+                };
+
+                let delta = tab.buffer.delete(delete_from_byte, start)?;
                 deltas.push(delta);
-                new_cursors.push(Cursor::new(prev_byte));
-                delta_offset -= (start - prev_byte) as isize;
+                new_cursors.push(Cursor::new(delete_from_byte));
+                delta_offset -= (start - delete_from_byte) as isize;
             } else {
                 new_cursors.push(Cursor::new(start));
             }
@@ -1898,5 +1919,102 @@ mod tests {
             "    fn main() {"
         );
         assert_eq!(ed.cursor_line_col(), (0, 15));
+    }
+
+    #[test]
+    fn test_smart_unindent_col_4_and_col_8() {
+        let mut ed = Editor::new();
+        ed.insert_str("        ").unwrap(); // 8 spaces
+        assert_eq!(ed.cursor_line_col(), (0, 8));
+
+        // First backspace unindents from col 8 to col 4
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 4));
+
+        // Second backspace unindents from col 4 to col 0
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            ""
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 0));
+    }
+
+    #[test]
+    fn test_smart_unindent_non_multiple_of_4_deletes_single_space() {
+        let mut ed = Editor::new();
+        ed.insert_str("      ").unwrap(); // 6 spaces
+        assert_eq!(ed.cursor_line_col(), (0, 6));
+
+        // Col 6 is not multiple of 4: deletes 1 space -> 5 spaces
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "     "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 5));
+
+        // Col 5 -> deletes 1 space -> 4 spaces
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 4));
+
+        // Col 4 is multiple of 4 with only spaces -> unindents 4 spaces -> 0 spaces
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            ""
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 0));
+    }
+
+    #[test]
+    fn test_smart_unindent_ignores_lines_with_non_space_prefix() {
+        let mut ed = Editor::new();
+        ed.insert_str("a   ").unwrap(); // 'a' + 3 spaces = col 4
+        assert_eq!(ed.cursor_line_col(), (0, 4));
+
+        // Col 4 is multiple of 4, but prefix contains 'a' -> deletes 1 space
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "a  "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 3));
+    }
+
+    #[test]
+    fn test_smart_unindent_disabled() {
+        let mut ed = Editor::new();
+        ed.config_mut().smart_unindent = false;
+        ed.insert_str("    ").unwrap();
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "   "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 3));
+    }
+
+    #[test]
+    fn test_smart_unindent_with_selection_deletes_selection() {
+        let mut ed = Editor::new();
+        ed.insert_str("        ").unwrap();
+        // Select the last 4 spaces
+        ed.cursors_mut().primary_mut().anchor = 4;
+        ed.cursors_mut().primary_mut().head = 8;
+        ed.delete_backwards().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    "
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 4));
     }
 }
