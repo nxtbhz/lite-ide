@@ -80,12 +80,32 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorConfig {
+    pub smart_indent: bool,
+    pub smart_unindent: bool,
+    pub auto_pairs: bool,
+    pub tab_size: usize,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            smart_indent: true,
+            smart_unindent: true,
+            auto_pairs: true,
+            tab_size: 4,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Editor {
     tabs: Vec<Tab>,
     active_tab: usize,
     next_tab_id: usize,
     autosave: AutoSaveController,
+    config: EditorConfig,
     save_channel: Option<(Sender<AsyncSaveEvent>, Receiver<AsyncSaveEvent>)>,
 }
 
@@ -102,6 +122,7 @@ impl Editor {
             active_tab: 0,
             next_tab_id: 2,
             autosave: AutoSaveController::default(),
+            config: EditorConfig::default(),
             save_channel: None,
         }
     }
@@ -113,6 +134,7 @@ impl Editor {
             active_tab: 0,
             next_tab_id: 2,
             autosave: AutoSaveController::default(),
+            config: EditorConfig::default(),
             save_channel: None,
         }
     }
@@ -670,6 +692,14 @@ impl Editor {
         &mut self.autosave
     }
 
+    pub fn config(&self) -> &EditorConfig {
+        &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut EditorConfig {
+        &mut self.config
+    }
+
     fn record_edit_internal(&mut self, deltas: &[TextDelta]) {
         let tab = &mut self.tabs[self.active_tab];
         tab.is_dirty = true;
@@ -843,7 +873,77 @@ impl Editor {
     }
 
     pub fn insert_newline(&mut self) -> Result<(), BufferError> {
-        self.insert_str("\n")
+        if !self.config.smart_indent {
+            return self.insert_str("\n");
+        }
+
+        let tab = &mut self.tabs[self.active_tab];
+        let cursors_before = tab.cursors.cursors().to_vec();
+
+        let mut sorted_cursors = cursors_before.clone();
+        sorted_cursors.sort_by_key(|c| (c.min(), c.max()));
+
+        // Pre-calculate newline and indentation string for each cursor before buffer mutations
+        let mut insert_strings: Vec<String> = Vec::with_capacity(sorted_cursors.len());
+        for cursor in &sorted_cursors {
+            let target_byte = cursor.min();
+            let line = tab.buffer.byte_to_line(target_byte);
+            let line_start_char = tab.buffer.rope().line_to_char(line);
+            let line_start_byte = tab.buffer.char_to_byte(line_start_char);
+
+            let prefix = tab.buffer.slice_to_cow(line_start_byte, target_byte);
+            let leading: String = prefix
+                .chars()
+                .take_while(|&c| c == ' ' || c == '\t')
+                .collect();
+
+            let trimmed = prefix.trim_end();
+            let extra_indent = if trimmed.ends_with('{')
+                || trimmed.ends_with('(')
+                || trimmed.ends_with('[')
+                || trimmed.ends_with(':')
+            {
+                " ".repeat(self.config.tab_size)
+            } else {
+                String::new()
+            };
+
+            insert_strings.push(format!("\n{}{}", leading, extra_indent));
+        }
+
+        let mut deltas: Vec<TextDelta> = Vec::new();
+        let mut new_cursors: Vec<Cursor> = Vec::new();
+        let mut delta_offset: isize = 0;
+
+        for (cursor, s) in sorted_cursors.into_iter().zip(insert_strings) {
+            let start = (cursor.min() as isize + delta_offset) as usize;
+            let end = (cursor.max() as isize + delta_offset) as usize;
+
+            let mut old_text = String::new();
+            let del_len = if cursor.is_selection() && start < end && end <= tab.buffer.len_bytes() {
+                let del_delta = tab.buffer.delete(start, end)?;
+                let len = del_delta.old_text.len();
+                old_text = del_delta.old_text;
+                len
+            } else {
+                0
+            };
+
+            let ins_delta = tab.buffer.insert(start, &s)?;
+            let new_pos = start + s.len();
+            new_cursors.push(Cursor::new(new_pos));
+
+            deltas.push(TextDelta::new(start, old_text, ins_delta.new_text));
+            delta_offset += s.len() as isize - del_len as isize;
+        }
+
+        tab.cursors.set_cursors(new_cursors);
+        let cursors_after = tab.cursors.cursors().to_vec();
+
+        tab.history
+            .record_edits(deltas.clone(), cursors_before, cursors_after);
+        self.record_edit_internal(&deltas);
+        Ok(())
     }
 
     pub fn delete_backwards(&mut self) -> Result<(), BufferError> {
@@ -1720,5 +1820,83 @@ mod tests {
         ed.page_up(10, true);
         assert_eq!(ed.cursor_line_col().0, 39);
         assert!(ed.cursors().primary().is_selection());
+    }
+
+    #[test]
+    fn test_smart_indent_copy_leading_spaces() {
+        let mut ed = Editor::new();
+        ed.insert_str("    let x = 10;").unwrap();
+        ed.insert_newline().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    let x = 10;\n    "
+        );
+        assert_eq!(ed.cursor_line_col(), (1, 4));
+    }
+
+    #[test]
+    fn test_smart_indent_delimiters_add_4_spaces() {
+        for delim in &["{", "(", "[", ":"] {
+            let mut ed = Editor::new();
+            ed.insert_str(&format!("    def test{}", delim)).unwrap();
+            ed.insert_newline().unwrap();
+            let expected = format!("    def test{}\n        ", delim);
+            assert_eq!(
+                ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+                expected
+            );
+            assert_eq!(ed.cursor_line_col(), (1, 8));
+        }
+    }
+
+    #[test]
+    fn test_smart_indent_with_trailing_spaces_after_delimiter() {
+        let mut ed = Editor::new();
+        ed.insert_str("struct Point {   ").unwrap();
+        ed.insert_newline().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "struct Point {   \n    "
+        );
+        assert_eq!(ed.cursor_line_col(), (1, 4));
+    }
+
+    #[test]
+    fn test_smart_indent_middle_of_line_split() {
+        let mut ed = Editor::new();
+        ed.insert_str("    let a = foo(); let b = 2;").unwrap();
+        ed.cursors_mut().set_single(18); // Logo após foo();
+        ed.insert_newline().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    let a = foo();\n     let b = 2;"
+        );
+    }
+
+    #[test]
+    fn test_smart_indent_disabled() {
+        let mut ed = Editor::new();
+        ed.config_mut().smart_indent = false;
+        ed.insert_str("    let x = 1;").unwrap();
+        ed.insert_newline().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    let x = 1;\n"
+        );
+        assert_eq!(ed.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn test_smart_indent_undo_atomic() {
+        let mut ed = Editor::new();
+        ed.insert_str("    fn main() {").unwrap();
+        ed.insert_newline().unwrap();
+        assert_eq!(ed.cursor_line_col(), (1, 8));
+        ed.undo();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "    fn main() {"
+        );
+        assert_eq!(ed.cursor_line_col(), (0, 15));
     }
 }

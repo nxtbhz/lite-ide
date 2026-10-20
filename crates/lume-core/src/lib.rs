@@ -9,6 +9,6 @@ pub mod search;
 pub use autosave::{AutoSaveConfig, AutoSaveController};
 pub use buffer::{BufferError, RopeBuffer, TextBuffer, TextDelta};
 pub use cursor::{Cursor, CursorAffinity, CursorSet};
-pub use editor::{AsyncSaveEvent, Editor, Tab};
+pub use editor::{AsyncSaveEvent, Editor, EditorConfig, Tab};
 pub use history::History;
 pub use journal::Journal;
