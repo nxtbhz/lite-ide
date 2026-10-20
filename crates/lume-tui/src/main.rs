@@ -1,5 +1,8 @@
+mod args;
 mod explorer;
 mod prompt;
+
+use args::{parse_cli_args, print_help, CliCommand, CliTargets};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -184,23 +187,109 @@ pub struct App {
 
 impl App {
     pub fn new(file_arg: Option<PathBuf>) -> Result<Self, std::io::Error> {
-        let editor = if let Some(ref path) = file_arg {
-            if path.exists() {
-                Editor::open(path)?
-            } else {
-                let mut ed = Editor::new();
-                ed.set_file_path(Some(path.clone()));
-                ed
+        let targets = match file_arg {
+            Some(path) => {
+                if path.is_dir() {
+                    CliTargets {
+                        workspace: Some(path),
+                        files: Vec::new(),
+                    }
+                } else {
+                    CliTargets {
+                        workspace: None,
+                        files: vec![path],
+                    }
+                }
             }
+            None => CliTargets::default(),
+        };
+        Self::open_targets(targets)
+    }
+
+    pub fn from_paths<P: AsRef<std::path::Path>>(paths: &[P]) -> Result<Self, std::io::Error> {
+        let str_args: Vec<String> = std::iter::once("lume".to_string())
+            .chain(paths.iter().map(|p| p.as_ref().to_string_lossy().to_string()))
+            .collect();
+        match parse_cli_args(&str_args) {
+            CliCommand::Run(targets) | CliCommand::BenchStartup(targets) => {
+                Self::open_targets(targets)
+            }
+            _ => Self::open_targets(CliTargets::default()),
+        }
+    }
+
+    pub fn open_targets(targets: CliTargets) -> Result<Self, std::io::Error> {
+        let initial_cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let workspace_root = if let Some(ref ws) = targets.workspace {
+            let resolved = if ws.is_absolute() {
+                ws.clone()
+            } else {
+                initial_cwd.join(ws)
+            };
+            std::fs::canonicalize(&resolved).unwrap_or(resolved)
         } else {
-            Editor::new()
+            std::fs::canonicalize(&initial_cwd).unwrap_or(initial_cwd.clone())
         };
 
-        let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let explorer = FileExplorer::new(current_dir);
+        let mut resolved_files = Vec::new();
+        for file in targets.files {
+            if file.is_absolute() {
+                resolved_files.push(file);
+            } else if initial_cwd.join(&file).exists() {
+                resolved_files.push(initial_cwd.join(&file));
+            } else if workspace_root.join(&file).exists() || targets.workspace.is_some() {
+                resolved_files.push(workspace_root.join(&file));
+            } else {
+                resolved_files.push(initial_cwd.join(&file));
+            }
+        }
+
+        let mut editor = Editor::new();
+        let mut initial_status = None;
+
+        if !resolved_files.is_empty() {
+            let mut first = true;
+            for file_path in &resolved_files {
+                if file_path.is_file() {
+                    if first {
+                        match editor.open_in_current_tab(file_path) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                initial_status =
+                                    Some(format!("Error opening {}: {}", file_path.display(), e));
+                                editor.set_file_path(Some(file_path.clone()));
+                            }
+                        }
+                        first = false;
+                    } else {
+                        match editor.open_tab(file_path) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                initial_status =
+                                    Some(format!("Error opening {}: {}", file_path.display(), e));
+                                let _ = editor.new_tab();
+                                editor.set_file_path(Some(file_path.clone()));
+                            }
+                        }
+                    }
+                } else if !file_path.exists() {
+                    if first {
+                        editor.set_file_path(Some(file_path.clone()));
+                        first = false;
+                    } else {
+                        let _ = editor.new_tab();
+                        editor.set_file_path(Some(file_path.clone()));
+                    }
+                }
+            }
+            editor.switch_tab(0);
+        }
+
+        let explorer = FileExplorer::new(workspace_root.clone());
         let (width, height) = terminal_size().unwrap_or((80, 24));
 
-        Ok(Self {
+        let mut app = Self {
             editor,
             explorer,
             focus: ActiveFocus::Editor,
@@ -226,7 +315,23 @@ impl App {
             syntax_worker: SyntaxWorker::spawn(),
             syntax_cache: HashMap::new(),
             syntax_in_flight: HashMap::new(),
-        })
+        };
+
+        if let Some(msg) = initial_status {
+            app.set_status(msg);
+        } else if resolved_files.len() == 1 {
+            if resolved_files[0].exists() {
+                app.set_status(format!("Opened {}", resolved_files[0].display()));
+            } else {
+                app.set_status(format!("New file: {}", resolved_files[0].display()));
+            }
+        } else if resolved_files.len() > 1 {
+            app.set_status(format!("Opened {} files", resolved_files.len()));
+        } else if targets.workspace.is_some() {
+            app.set_status(format!("Workspace: {}", workspace_root.display()));
+        }
+
+        Ok(app)
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -887,7 +992,14 @@ impl App {
                     match prompt.action {
                         PromptAction::OpenFile => {
                             if !val.is_empty() {
-                                let path = PathBuf::from(&val);
+                                let raw_p = PathBuf::from(&val);
+                                let path = if raw_p.is_absolute() {
+                                    raw_p
+                                } else if self.explorer.root.join(&raw_p).exists() {
+                                    self.explorer.root.join(&raw_p)
+                                } else {
+                                    raw_p
+                                };
                                 if path.exists() {
                                     match self.editor.open_or_load(&path) {
                                         Ok(_) => {
@@ -903,7 +1015,12 @@ impl App {
                         }
                         PromptAction::SaveFileAs => {
                             if !val.is_empty() {
-                                let path = PathBuf::from(&val);
+                                let raw_p = PathBuf::from(&val);
+                                let path = if raw_p.is_absolute() {
+                                    raw_p
+                                } else {
+                                    self.explorer.root.join(raw_p)
+                                };
                                 match self.editor.save_as(&path) {
                                     Ok(()) => {
                                         self.explorer.refresh();
@@ -1349,27 +1466,28 @@ impl App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
+    let cli_cmd = parse_cli_args(&args);
 
-    if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("lume 0.1.0 (M1 functional MVP)");
-        return Ok(());
-    }
-
-    let file_arg = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))
-        .map(PathBuf::from);
-
-    if args.iter().any(|a| a == "--bench-startup") {
-        let start = Instant::now();
-        let mut app = App::new(file_arg)?;
-        let mut sink = std::io::sink();
-        app.render(&mut sink)?;
-        let duration = start.elapsed();
-        println!("Cold startup time: {:.2?}", duration);
-        return Ok(());
-    }
+    let targets = match cli_cmd {
+        CliCommand::Help => {
+            print_help();
+            return Ok(());
+        }
+        CliCommand::Version => {
+            println!("lume 0.1.0 (M1 functional MVP)");
+            return Ok(());
+        }
+        CliCommand::BenchStartup(targets) => {
+            let start = Instant::now();
+            let mut app = App::open_targets(targets)?;
+            let mut sink = std::io::sink();
+            app.render(&mut sink)?;
+            let duration = start.elapsed();
+            println!("Cold startup time: {:.2?}", duration);
+            return Ok(());
+        }
+        CliCommand::Run(targets) => targets,
+    };
 
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1386,7 +1504,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let _guard = TerminalGuard::init()?;
-    let mut app = App::new(file_arg)?;
+    let mut app = App::open_targets(targets)?;
 
     let (tx, rx) = crossbeam_channel::unbounded();
 
@@ -1763,5 +1881,95 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.editor.cursor_line_col().0, 0);
+    }
+
+    #[test]
+    fn test_app_open_directory_workspace() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_test_ws_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let sub_file = tmp_dir.join("workspace_sample.txt");
+        std::fs::write(&sub_file, "sample in ws").unwrap();
+
+        let app = App::from_paths(&[&tmp_dir]).unwrap();
+        assert_eq!(app.explorer.root, std::fs::canonicalize(&tmp_dir).unwrap());
+        // Editor should have 1 untitled clean tab
+        assert_eq!(app.editor.tabs().len(), 1);
+        assert!(app.editor.file_path().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_app_open_single_existing_file() {
+        let app = App::from_paths(&["Cargo.toml"]).unwrap();
+        assert_eq!(app.editor.tabs().len(), 1);
+        assert!(app.editor.file_path().is_some());
+        assert!(app.editor.buffer().len_bytes() > 0);
+    }
+
+    #[test]
+    fn test_app_open_single_new_file() {
+        let new_file_name = format!("new_file_{}.txt", std::process::id());
+        let app = App::from_paths(&[&new_file_name]).unwrap();
+        assert_eq!(app.editor.tabs().len(), 1);
+        assert!(app.editor.file_path().is_some());
+        assert_eq!(app.editor.buffer().len_bytes(), 0);
+    }
+
+    #[test]
+    fn test_app_open_multiple_files_tabs() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_multi_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let file1 = tmp_dir.join("file1.txt");
+        let file2 = tmp_dir.join("file2.txt");
+        std::fs::write(&file1, "file1 content").unwrap();
+        std::fs::write(&file2, "file2 content").unwrap();
+
+        let app = App::from_paths(&[&file1, &file2]).unwrap();
+        assert_eq!(app.editor.tabs().len(), 2);
+        assert_eq!(app.editor.active_tab_idx(), 0);
+
+        // Tab 1
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "file1 content"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_app_open_directory_and_file() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_ws_file_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let file = tmp_dir.join("hello.txt");
+        std::fs::write(&file, "hello world").unwrap();
+
+        let app = App::from_paths(&[&tmp_dir, &file]).unwrap();
+        assert_eq!(app.explorer.root, std::fs::canonicalize(&tmp_dir).unwrap());
+        assert_eq!(app.editor.tabs().len(), 1);
+        assert_eq!(
+            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            "hello world"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_app_open_wildcard_glob() {
+        let tmp_dir = std::env::temp_dir().join(format!("lume_glob_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let f1 = tmp_dir.join("test_a.txt");
+        let f2 = tmp_dir.join("test_b.txt");
+        std::fs::write(&f1, "content a").unwrap();
+        std::fs::write(&f2, "content b").unwrap();
+
+        let pattern = format!("{}/*.txt", tmp_dir.display());
+        let app = App::from_paths(&[&pattern]).unwrap();
+        assert_eq!(app.editor.tabs().len(), 2);
+        assert_eq!(app.editor.active_tab_idx(), 0);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

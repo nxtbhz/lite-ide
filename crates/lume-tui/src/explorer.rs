@@ -238,7 +238,7 @@ impl FileExplorer {
             .root
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("WORKSPACE");
+            .unwrap_or_else(|| self.root.to_str().unwrap_or("WORKSPACE"));
         let header_raw = format!(" 📁 {} [F2]", root_name);
         let header_text = truncate_to_width(&header_raw, content_w);
         let fill = content_w.saturating_sub(display_width(&header_text));
