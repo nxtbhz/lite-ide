@@ -1076,7 +1076,7 @@ impl Editor {
                 let prefix = tab.buffer.slice_to_cow(line_start_byte, start);
                 let is_all_spaces = !prefix.is_empty() && prefix.chars().all(|c| c == ' ');
                 let can_unindent =
-                    smart_unindent && is_all_spaces && (col > 0 && col % tab_size == 0);
+                    smart_unindent && is_all_spaces && (col > 0 && col.is_multiple_of(tab_size));
 
                 let delete_from_byte = if can_unindent {
                     let target_char = cursor_char - tab_size;
@@ -2021,18 +2021,12 @@ mod tests {
 
         // First backspace unindents from col 8 to col 4
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "    "
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "    ");
         assert_eq!(ed.cursor_line_col(), (0, 4));
 
         // Second backspace unindents from col 4 to col 0
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            ""
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "");
         assert_eq!(ed.cursor_line_col(), (0, 0));
     }
 
@@ -2052,18 +2046,12 @@ mod tests {
 
         // Col 5 -> deletes 1 space -> 4 spaces
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "    "
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "    ");
         assert_eq!(ed.cursor_line_col(), (0, 4));
 
         // Col 4 is multiple of 4 with only spaces -> unindents 4 spaces -> 0 spaces
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            ""
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "");
         assert_eq!(ed.cursor_line_col(), (0, 0));
     }
 
@@ -2075,10 +2063,7 @@ mod tests {
 
         // Col 4 is multiple of 4, but prefix contains 'a' -> deletes 1 space
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "a  "
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "a  ");
         assert_eq!(ed.cursor_line_col(), (0, 3));
     }
 
@@ -2088,10 +2073,7 @@ mod tests {
         ed.config_mut().smart_unindent = false;
         ed.insert_str("    ").unwrap();
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "   "
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "   ");
         assert_eq!(ed.cursor_line_col(), (0, 3));
     }
 
@@ -2103,10 +2085,7 @@ mod tests {
         ed.cursors_mut().primary_mut().anchor = 4;
         ed.cursors_mut().primary_mut().head = 8;
         ed.delete_backwards().unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "    "
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "    ");
         assert_eq!(ed.cursor_line_col(), (0, 4));
     }
 
@@ -2183,18 +2162,12 @@ mod tests {
         let mut ed = Editor::new();
         // Type '(' -> '()' with cursor inside
         ed.insert_char('(').unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "()"
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "()");
         assert_eq!(ed.cursor_line_col(), (0, 1));
 
         // Type ')' -> overtypes, advancing cursor past ')' without inserting duplicate
         ed.insert_char(')').unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "()"
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "()");
         assert_eq!(ed.cursor_line_col(), (0, 2));
 
         // Quotes overtype
@@ -2214,10 +2187,7 @@ mod tests {
         let mut ed = Editor::new();
         ed.config_mut().auto_pairs = false;
         ed.insert_char('(').unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "("
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "(");
         assert_eq!(ed.cursor_line_col(), (0, 1));
     }
 
@@ -2225,15 +2195,9 @@ mod tests {
     fn test_auto_pairs_undo_atomic() {
         let mut ed = Editor::new();
         ed.insert_char('{').unwrap();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            "{}"
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "{}");
         ed.undo();
-        assert_eq!(
-            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
-            ""
-        );
+        assert_eq!(ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()), "");
         assert_eq!(ed.cursor_line_col(), (0, 0));
     }
 

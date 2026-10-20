@@ -2889,7 +2889,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "    fn test() {\n        "
         );
         assert_eq!(app.editor.cursor_line_col(), (1, 8));
@@ -2904,7 +2906,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "    "
         );
         assert_eq!(app.editor.cursor_line_col(), (0, 4));
@@ -2917,7 +2921,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('('), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "()"
         );
         assert_eq!(app.editor.cursor_line_col(), (0, 1));
@@ -2926,7 +2932,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(')'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(
-            app.editor.buffer().slice_to_cow(0, app.editor.buffer().len_bytes()),
+            app.editor
+                .buffer()
+                .slice_to_cow(0, app.editor.buffer().len_bytes()),
             "()"
         );
         assert_eq!(app.editor.cursor_line_col(), (0, 2));
