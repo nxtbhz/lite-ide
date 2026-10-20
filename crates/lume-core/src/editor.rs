@@ -895,7 +895,7 @@ impl Editor {
                 let mut delta_offset: isize = 0;
 
                 for cur in sorted_cursors {
-                    let start = (cur.min() as isize + delta_offset) as usize;
+                    let start = (cur.min() as isize + delta_offset).max(0) as usize;
                     let ins_delta = tab_mut.buffer.insert(start, &pair_str)?;
                     // Cursor placed in the middle of pair
                     let new_pos = start + c.len_utf8();
@@ -993,7 +993,7 @@ impl Editor {
             let extra_indent = if trimmed.ends_with('{')
                 || trimmed.ends_with('(')
                 || trimmed.ends_with('[')
-                || trimmed.ends_with(':')
+                || (trimmed.ends_with(':') && !trimmed.ends_with("::"))
             {
                 " ".repeat(self.config.tab_size)
             } else {
@@ -1008,8 +1008,8 @@ impl Editor {
         let mut delta_offset: isize = 0;
 
         for (cursor, s) in sorted_cursors.into_iter().zip(insert_strings) {
-            let start = (cursor.min() as isize + delta_offset) as usize;
-            let end = (cursor.max() as isize + delta_offset) as usize;
+            let start = (cursor.min() as isize + delta_offset).max(0) as usize;
+            let end = (cursor.max() as isize + delta_offset).max(0) as usize;
 
             let mut old_text = String::new();
             let del_len = if cursor.is_selection() && start < end && end <= tab.buffer.len_bytes() {
@@ -1049,12 +1049,12 @@ impl Editor {
         let mut new_cursors: Vec<Cursor> = Vec::new();
         let mut delta_offset: isize = 0;
 
-        let tab_size = self.config.tab_size;
+        let tab_size = self.config.tab_size.max(1);
         let smart_unindent = self.config.smart_unindent;
 
         for cursor in sorted_cursors {
-            let start = (cursor.min() as isize + delta_offset) as usize;
-            let end = (cursor.max() as isize + delta_offset) as usize;
+            let start = (cursor.min() as isize + delta_offset).max(0) as usize;
+            let end = (cursor.max() as isize + delta_offset).max(0) as usize;
 
             if cursor.is_selection() {
                 if start < end && end <= tab.buffer.len_bytes() {
@@ -2298,5 +2298,26 @@ mod tests {
         assert_eq!(ed.cursors().cursors().len(), 2);
         assert_eq!(ed.cursors().cursors()[0].head, 3);
         assert_eq!(ed.cursors().cursors()[1].head, 8);
+    }
+
+    #[test]
+    fn test_smart_unindent_tab_size_zero_does_not_panic() {
+        let mut ed = Editor::new();
+        ed.config_mut().tab_size = 0;
+        ed.insert_str("    ").unwrap();
+        // Should not panic with division by zero
+        assert!(ed.delete_backwards().is_ok());
+    }
+
+    #[test]
+    fn test_smart_indent_scope_resolution_operator_does_not_extra_indent() {
+        let mut ed = Editor::new();
+        ed.insert_str("use std::").unwrap();
+        ed.insert_newline().unwrap();
+        assert_eq!(
+            ed.buffer().slice_to_cow(0, ed.buffer().len_bytes()),
+            "use std::\n"
+        );
+        assert_eq!(ed.cursor_line_col(), (1, 0));
     }
 }
