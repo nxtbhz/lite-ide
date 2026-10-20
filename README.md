@@ -59,32 +59,32 @@ Conducted on Ubuntu 26.04.1 LTS (AMD Ryzen 7 5825U, 16 vCPUs, 14 GiB RAM) using 
 
 ### Startup Latency
 
-| Benchmark Scenario | Lume | Vim 9.1 | Neovim 0.11 | Relative Latency |
-| :--- | :---: | :---: | :---: | :---: |
-| **Cold Start (Empty Buffer)** | **1.7 ms** | 13.6 ms | 17.2 ms | Vim 7.9x / Neovim 10.0x slower |
-| **Real Code (Rust, 1,580 lines)** | **2.3 ms** | 21.3 ms | 32.9 ms | Vim 9.2x / Neovim 14.2x slower |
-| **Large File (C, 100k lines / 5.1 MB)** | **25.3 ms** | 46.0 ms | 53.9 ms | Lume 1.8x – 2.1x faster |
-| **Massive File (C, 500k lines / 27 MB)** | **119.8 ms** | 155.0 ms | 148.7 ms | Instant interactive load |
+| Benchmark Scenario | Lume | Vim 9.1 | Neovim 0.11 | Helix 25.07 | Relative Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Cold Start (Empty Buffer)** | **1.9 ms** | 14.4 ms | 18.8 ms | 35.3 ms | Lume 18.1x faster than Helix (7.4x Vim / 9.6x Neovim) |
+| **Real Code (Rust, 1,580 lines)** | **2.6 ms** | 22.2 ms | 33.8 ms | 339.9 ms | Lume 129.1x faster than Helix (8.4x Vim / 12.9x Neovim) |
+| **Large File (C, 100k lines / 5.1 MB)** | **27.4 ms** | 46.9 ms | 56.1 ms | 607.2 ms | Lume 22.2x faster than Helix (1.7x Vim / 2.0x Neovim) |
+| **Massive File (C, 500k lines / 27 MB)** | **131.3 ms** | 153.8 ms | 152.4 ms | 660.3 ms | Lume 5.0x faster than Helix (1.2x Vim / 1.2x Neovim) |
 
 > *Internal engine latency:* Initializing Lume's core data structures (`Editor::new()`) takes just **216 nanoseconds** in memory.
 
 ### Memory Footprint (Peak Resident Set Size)
 
-| Scenario | Lume | Vim 9.1 | Neovim 0.11 | Notes |
-| :--- | :---: | :---: | :---: | :---: |
-| **Empty Buffer** | **3.10 MB** | 11.24 MB | 11.19 MB | **~3.6x lower RAM consumption** |
-| **Real Code (1,580 lines)** | **3.95 MB** | 11.84 MB | 12.50 MB | **~3.0x lower RAM consumption** |
-| **100k Lines (5.1 MB)** | **14.78 MB** | 17.55 MB | 17.82 MB | Highly efficient node packing |
-| **500k Lines (27 MB)** | **59.75 MB** | 41.66 MB | 42.10 MB | B-Tree indexing overhead for $O(\log N)$ edits |
+| Scenario | Lume | Vim 9.1 | Neovim 0.11 | Helix 25.07 | Notes |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Empty Buffer** | **3.19 MB** | 11.03 MB | 10.69 MB | 16.63 MB | **~5.2x lower RAM than Helix** (~3.5x lower than Vim/Neovim) |
+| **Real Code (1,580 lines)** | **3.96 MB** | 11.76 MB | 11.69 MB | 26.94 MB | **~6.8x lower RAM than Helix** (~3.0x lower than Vim/Neovim) |
+| **100k Lines (5.1 MB)** | **14.53 MB** | 17.64 MB | 17.56 MB | 100.20 MB | Highly efficient B-Tree node packing in Lume |
+| **500k Lines (27 MB)** | **59.87 MB** | 41.03 MB | 41.75 MB | 126.94 MB | Lume and Helix use Ropey B-Tree; Lume 2.1x more memory-efficient |
 
 ### Installation & Dependencies
 
-| Metric | Lume | Vim 9.1 | Neovim 0.11 |
-| :--- | :---: | :---: | :---: |
-| **Executable Size** | **7.4 MB** *(stripped)* | 4.4 MB | 6.1 MB |
-| **Runtime Assets Directory** | **0 MB** *(fully embedded)* | 45.0 MB (`/usr/share/vim`) | 26.0 MB (`/usr/share/nvim`) |
-| **Total Disk Footprint** | **7.4 MB** | **49.4 MB** | **32.1 MB** |
-| **Dynamic Libraries (`ldd`)** | **4** (`libc`, `libm`, `libgcc`, `ld-linux`) | 13 | 12 (`libuv`, `libmsgpack`, `libluajit`...) |
+| Metric | Lume | Vim 9.1 | Neovim 0.11 | Helix 25.07 |
+| :--- | :---: | :---: | :---: | :---: |
+| **Executable Size** | **7.5 MB** *(stripped)* | 4.4 MB | 6.1 MB | 18.1 MB |
+| **Runtime Assets Directory** | **0 MB** *(fully embedded)* | 45.0 MB (`/usr/share/vim`) | 26.0 MB (`/usr/share/nvim`) | 189.0 MB (`runtime/`) |
+| **Total Disk Footprint** | **7.5 MB** | **49.4 MB** | **32.1 MB** | **207.1 MB** |
+| **Dynamic Libraries (`ldd`)** | **4** (`libc`, `libm`, `libgcc`, `ld-linux`) | 13 | 12 (`libuv`, `libmsgpack`, `libluajit`...) | 5 |
 
 ### Internal Engine Microbenchmarks (Criterion)
 
@@ -105,7 +105,7 @@ Lume is organized as a modular Cargo workspace following strict domain decouplin
 ```
 lume/
 ├── Cargo.toml                 # Workspace root configuration
-├── benchmark.sh               # Automated benchmarking suite (Lume vs Vim vs Neovim)
+├── benchmark.sh               # Automated benchmarking suite (Lume vs Vim vs Neovim vs Helix)
 ├── docs/
 │   ├── plan.md                # Architectural roadmap and implementation specs (M0–M4)
 │   └── Benchmark.md           # Full performance metrics report
@@ -165,7 +165,7 @@ cargo test
 # Run Criterion microbenchmarks for lume-core
 cargo bench -p lume-core
 
-# Run automated end-to-end comparison against Vim and Neovim
+# Run automated end-to-end comparison against Vim, Neovim, and Helix
 ./benchmark.sh
 ```
 
