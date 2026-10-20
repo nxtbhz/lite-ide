@@ -261,7 +261,7 @@ impl FileExplorer {
             ));
         }
 
-        let trimmed = trimmed_input.trim_end_matches(|c| c == '/' || c == '\\');
+        let trimmed = trimmed_input.trim_end_matches(['/', '\\']);
         if trimmed.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
