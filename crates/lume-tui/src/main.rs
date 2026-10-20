@@ -1130,19 +1130,29 @@ impl App {
                             if !val.is_empty() {
                                 match self.explorer.create_folder(&parent_dir, &val) {
                                     Ok(created) => {
-                                        self.set_status(format!("Created folder: {}", created.display()));
+                                        self.set_status(format!(
+                                            "Created folder: {}",
+                                            created.display()
+                                        ));
                                     }
-                                    Err(e) => self.set_status(format!("Create folder error: {}", e)),
+                                    Err(e) => {
+                                        self.set_status(format!("Create folder error: {}", e))
+                                    }
                                 }
                             }
                         }
                         PromptAction::ConfirmDeleteFolder { path } => {
-                            let should_delete = val.is_empty() || val.eq_ignore_ascii_case("y") || val.eq_ignore_ascii_case("yes");
+                            let should_delete = val.is_empty()
+                                || val.eq_ignore_ascii_case("y")
+                                || val.eq_ignore_ascii_case("yes");
                             if should_delete {
                                 self.handle_deleted_folder_tabs(&path);
                                 match self.explorer.delete_folder(&path) {
                                     Ok(deleted) => {
-                                        self.set_status(format!("Deleted folder: {}", deleted.display()));
+                                        self.set_status(format!(
+                                            "Deleted folder: {}",
+                                            deleted.display()
+                                        ));
                                     }
                                     Err(e) => self.set_status(format!("Delete error: {}", e)),
                                 }
@@ -2126,11 +2136,19 @@ mod tests {
 
         let mut app = App::from_paths(&[&tmp_dir, &sub_file]).unwrap();
         assert_eq!(app.editor.tabs().len(), 1);
-        assert_eq!(app.editor.file_path(), Some(sub_file.canonicalize().unwrap().as_path()));
+        assert_eq!(
+            app.editor.file_path(),
+            Some(sub_file.canonicalize().unwrap().as_path())
+        );
 
         app.focus = ActiveFocus::Explorer;
         // Select 'submodule' directory in explorer
-        if let Some(pos) = app.explorer.items.iter().position(|it| it.name == "submodule") {
+        if let Some(pos) = app
+            .explorer
+            .items
+            .iter()
+            .position(|it| it.name == "submodule")
+        {
             app.explorer.selected_idx = pos;
         }
 
@@ -2198,11 +2216,17 @@ mod tests {
         // Ctrl+A should NOT open new folder prompt
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .unwrap();
-        assert!(app.prompt.is_none(), "Ctrl+A should not open prompt in explorer");
+        assert!(
+            app.prompt.is_none(),
+            "Ctrl+A should not open prompt in explorer"
+        );
 
         // Ctrl+D should NOT open delete prompt
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
             .unwrap();
-        assert!(app.prompt.is_none(), "Ctrl+D should not open prompt in explorer");
+        assert!(
+            app.prompt.is_none(),
+            "Ctrl+D should not open prompt in explorer"
+        );
     }
 }

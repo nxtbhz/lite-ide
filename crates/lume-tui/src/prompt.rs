@@ -60,7 +60,9 @@ impl InputPrompt {
         let suggestions: Vec<String> = all_langs.iter().map(|s| s.to_string()).collect();
         Self {
             action: PromptAction::SetLanguage,
-            title: Cow::Borrowed(" Select Language Mode (Type to filter, Enter: apply, Esc: cancel) "),
+            title: Cow::Borrowed(
+                " Select Language Mode (Type to filter, Enter: apply, Esc: cancel) ",
+            ),
             value: String::new(),
             cursor_pos: 0,
             suggestions,
@@ -69,7 +71,10 @@ impl InputPrompt {
     }
 
     pub fn create_folder(parent_dir: PathBuf, display_name: &str) -> Self {
-        let formatted = format!(" Create Folder in '{}' (Enter: create, Esc: cancel) ", display_name);
+        let formatted = format!(
+            " Create Folder in '{}' (Enter: create, Esc: cancel) ",
+            display_name
+        );
         Self {
             action: PromptAction::CreateFolder { parent_dir },
             title: Cow::Owned(formatted),
@@ -81,8 +86,14 @@ impl InputPrompt {
     }
 
     pub fn confirm_delete_folder(path: PathBuf) -> Self {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
-        let formatted = format!(" Delete folder '{}' and all contents? (y/Enter: confirm, Esc: cancel) ", name);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("folder");
+        let formatted = format!(
+            " Delete folder '{}' and all contents? (y/Enter: confirm, Esc: cancel) ",
+            name
+        );
         Self {
             action: PromptAction::ConfirmDeleteFolder { path },
             title: Cow::Owned(formatted),
@@ -140,7 +151,9 @@ impl InputPrompt {
                     self.selected_suggestion = 0;
                 }
             }
-            PromptAction::SetLanguage | PromptAction::CreateFolder { .. } | PromptAction::ConfirmDeleteFolder { .. } => {
+            PromptAction::SetLanguage
+            | PromptAction::CreateFolder { .. }
+            | PromptAction::ConfirmDeleteFolder { .. } => {
                 // Handled in handle_key with filter or no suggestions needed
             }
         }
@@ -342,7 +355,10 @@ mod tests {
         use std::path::PathBuf;
         let parent = PathBuf::from("/workspace/crates");
         let prompt = InputPrompt::create_folder(parent.clone(), "crates");
-        assert_eq!(prompt.action, PromptAction::CreateFolder { parent_dir: parent });
+        assert_eq!(
+            prompt.action,
+            PromptAction::CreateFolder { parent_dir: parent }
+        );
         assert!(prompt.title.contains("crates"));
         assert_eq!(prompt.value, "");
     }
@@ -352,7 +368,10 @@ mod tests {
         use std::path::PathBuf;
         let target = PathBuf::from("/workspace/crates/old_module");
         let prompt = InputPrompt::confirm_delete_folder(target.clone());
-        assert_eq!(prompt.action, PromptAction::ConfirmDeleteFolder { path: target });
+        assert_eq!(
+            prompt.action,
+            PromptAction::ConfirmDeleteFolder { path: target }
+        );
         assert!(prompt.title.contains("old_module"));
     }
 }

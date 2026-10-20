@@ -270,7 +270,10 @@ impl FileExplorer {
         }
 
         // Prevent escaping root workspace
-        let root_canon = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let root_canon = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
         if let Ok(canon_base) = base_dir.canonicalize() {
             if !canon_base.starts_with(&root_canon) {
                 return Err(std::io::Error::new(
@@ -348,7 +351,10 @@ impl FileExplorer {
 
     pub fn delete_folder<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<PathBuf> {
         let target = path.as_ref();
-        let root_canon = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let root_canon = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
         let target_canon = target.canonicalize()?;
 
         if target_canon == root_canon {
@@ -702,10 +708,15 @@ mod tests {
         let created_single = explorer.create_folder(&root_canon, "alpha").unwrap();
         assert!(created_single.exists());
         assert!(created_single.is_dir());
-        assert!(explorer.items.iter().any(|item| item.name == "alpha" && item.is_dir));
+        assert!(explorer
+            .items
+            .iter()
+            .any(|item| item.name == "alpha" && item.is_dir));
 
         // 2. Create nested folders inside alpha: alpha/beta/gamma
-        let created_nested = explorer.create_folder(&created_single, "beta/gamma").unwrap();
+        let created_nested = explorer
+            .create_folder(&created_single, "beta/gamma")
+            .unwrap();
         assert!(created_nested.exists());
         assert!(created_nested.is_dir());
 
@@ -769,14 +780,18 @@ mod tests {
         assert!(!explorer.expanded_dirs.contains(&grandchild));
 
         // Items should be empty or clamped
-        assert!(!explorer.items.iter().any(|it| it.path.starts_with(&parent_path)));
+        assert!(!explorer
+            .items
+            .iter()
+            .any(|it| it.path.starts_with(&parent_path)));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]
     fn test_delete_root_folder_prevented() {
-        let tmp_dir = std::env::temp_dir().join(format!("lume_test_root_del_{}", std::process::id()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("lume_test_root_del_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
@@ -785,7 +800,10 @@ mod tests {
 
         let res = explorer.delete_folder(&root_canon);
         assert!(res.is_err());
-        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            res.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
         assert!(tmp_dir.exists());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -817,7 +835,9 @@ mod tests {
 
         // Create 10 directories
         for i in 0..10 {
-            explorer.create_folder(&root_canon, format!("dir_{:02}", i)).unwrap();
+            explorer
+                .create_folder(&root_canon, format!("dir_{:02}", i))
+                .unwrap();
         }
         assert_eq!(explorer.items.len(), 10);
 
@@ -833,8 +853,14 @@ mod tests {
         assert_eq!(explorer.items.len(), 3);
 
         // scroll_offset must be clamped so it does not render a blank sidebar
-        assert!(explorer.scroll_offset < explorer.items.len(), "scroll_offset was not clamped!");
-        assert!(explorer.scroll_offset <= explorer.selected_idx, "scroll_offset must not exceed selected_idx");
+        assert!(
+            explorer.scroll_offset < explorer.items.len(),
+            "scroll_offset was not clamped!"
+        );
+        assert!(
+            explorer.scroll_offset <= explorer.selected_idx,
+            "scroll_offset must not exceed selected_idx"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
